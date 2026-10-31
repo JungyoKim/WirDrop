@@ -49,6 +49,11 @@ Windows 계정용으로 보호(DPAPI)해 둡니다. Apple 서버는 요청마다
 iCloud for Windows의 구성 요소가 만듭니다. WirDrop은 첫 로그인 때 이를 Apple에서 받아(약 160 MB)
 iCloud를 설치하지 않고 풀어서 씁니다.
 
+iCloud for Windows나 iTunes를 한 번도 켠 적 없는 PC는 Apple에 기기로 등록되어 있지 않아, 그 구성
+요소가 보증을 만들지 못합니다. WirDrop은 첫 로그인 전에 그 두 프로그램과 같은 방식으로 한 번
+등록합니다: Apple이 질문을 보내면 iCloud의 코드가 답하고, Apple이 이 PC를 기록합니다. 암호는 쓰지
+않고, 이미 등록된 PC는 그대로 둡니다.
+
 PC를 같이 쓰는 사람마다 Apple ID를 하나씩 더할 수 있습니다. Mac에서 사용자마다 Apple ID가 있는 것과
 같습니다. 어느 폰에서든 PC는 한 번만 보입니다. 주인의 폰에는 내 기기로, 다른 사람에게는 이름으로
 보입니다.

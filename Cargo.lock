@@ -2627,6 +2627,7 @@ dependencies = [
 name = "wirdrop-appleid-anisette"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "windows-sys 0.61.2",
 ]
 

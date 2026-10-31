@@ -2,6 +2,8 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::io::{BufRead, Write};
 
+use base64::Engine;
+
 use windows_sys::Win32::Foundation::{HMODULE, WIN32_ERROR};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows_sys::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
@@ -19,6 +21,31 @@ const UTF8: u32 = 0x0800_0100;
 /// AOSKit의 HKLM\SOFTWARE\Apple… 조회를 돌리는 HKCU 아래 위치.
 const REDIRECT: &str = r"Software\WirDrop\HKLM";
 
+/// Apple에 기기로 등록할 때 쓰는 DSID: 계정이 아니라 이 기기라는 뜻의 -2 (64비트 두 조각).
+const DEVICE_DSID: (u32, u32) = (0xffff_fffe, 0xffff_ffff);
+
+/// 기기 등록(provisioning)을 하는 CoreADI 호출들. AOSKit은 이것들을 내보내지 않지만, 내보낸
+/// Objective-C 메서드 +[AOSUtilities _performProvisioningAction:forRequest:withDSID:andClientID:]가
+/// 안에서 부릅니다. 그 메서드의 코드에서 call 명령의 주소를 읽어 찾습니다. iCloud for Windows
+/// 7.21을 SHA-256으로 확인해 받으므로 (appleid의 anisette.rs) 이 자리는 늘 같고, call이 아니면
+/// 오류로 멈춥니다. CoreADI 자체는 난독화되어 있어 들여다보지 않고 부르기만 합니다.
+struct Provisioning {
+    /// 시작: 서버가 준 spim으로 cpim과 session을 만듭니다.
+    start: unsafe extern "C" fn(u32, u32, *const u8, u32, *mut *mut u8, *mut u32, *mut u32) -> i32,
+    /// 끝: 서버가 준 ptm과 tk를 넣어 등록을 디스크에 씁니다.
+    end: unsafe extern "C" fn(u32, *const u8, u32, *const u8, u32) -> i32,
+    /// session을 놓습니다 (끝났든 실패했든).
+    destroy: unsafe extern "C" fn(u32),
+    /// CoreADI가 준 버퍼를 돌려줍니다.
+    free: unsafe extern "C" fn(*mut u8),
+}
+
+/// 그 메서드 안에서 각 call이 있는 자리.
+const CALL_START: usize = 0x1a6;
+const CALL_END: usize = 0x4b2;
+const CALL_DESTROY: usize = 0x4cf;
+const CALL_FREE: usize = 0x287;
+
 /// 이것이 쓰는 Apple 런타임 호출 몇 가지. 모두 C 호출 (32비트 Windows의 cdecl).
 struct Aos {
     send: unsafe extern "C" fn(Id, Sel, Id) -> Id,
@@ -28,6 +55,8 @@ struct Aos {
     release: unsafe extern "C" fn(CfRef),
     utilities: Id,
     headers_for_dsid: Sel,
+    /// 이 AOSKit에서 등록 호출을 찾지 못했으면 그 까닭. 일회용 암호는 그래도 됩니다.
+    provisioning: Result<Provisioning, String>,
 }
 
 /// 표준 입력이 끝날 때까지 요청에 답합니다. 종료 코드: 0.
@@ -38,20 +67,49 @@ pub fn run() -> i32 {
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        let answer = match line.trim() {
-            "" => continue,
-            // SAFETY: 위에서 불러온 Apple 런타임을, 불러온 그 스레드에서.
-            "otp" => match aos.as_ref().map_err(String::clone).and_then(|aos| unsafe { aos.otp() }) {
-                Ok((md, mdm)) => format!("{{\"md\":\"{}\",\"mdm\":\"{}\"}}", escape(&md), escape(&mdm)),
-                Err(e) => error(&e),
-            },
-            other => error(&format!("unknown request {other:?}")),
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let answer = match aos.as_ref().map_err(String::clone).and_then(|aos| answer(aos, &words)) {
+            Ok(answer) => answer,
+            Err(e) => error(&e),
         };
         if writeln!(out, "{answer}").and_then(|()| out.flush()).is_err() {
             break;
         }
     }
     0
+}
+
+/// 요청 한 줄에 대한 답 (JSON 한 줄).
+fn answer(aos: &Aos, words: &[&str]) -> Result<String, String> {
+    // SAFETY: 모두 불러온 그 스레드에서 하는 Apple 런타임 호출입니다.
+    unsafe {
+        match words {
+            ["otp"] => {
+                let (md, mdm) = aos.otp()?;
+                Ok(format!("{{\"md\":\"{}\",\"mdm\":\"{}\"}}", escape(&md), escape(&mdm)))
+            }
+            ["provision-start", spim] => {
+                let (cpim, session) = aos.provision_start(&unbase64(spim)?)?;
+                Ok(format!(
+                    "{{\"cpim\":\"{}\",\"session\":{session}}}",
+                    base64::engine::general_purpose::STANDARD.encode(cpim)
+                ))
+            }
+            ["provision-end", session, ptm, tk] => {
+                let session = session.parse::<u32>().map_err(|_| format!("bad session {session:?}"))?;
+                aos.provision_end(session, &unbase64(ptm)?, &unbase64(tk)?)?;
+                Ok("{\"ok\":true}".to_string())
+            }
+            other => Err(format!("unknown request {other:?}")),
+        }
+    }
+}
+
+fn unbase64(text: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD.decode(text).map_err(|e| e.to_string())
 }
 
 fn error(message: &str) -> String {
@@ -97,6 +155,7 @@ impl Aos {
                 release: symbol(cf, c"CFRelease")?,
                 utilities,
                 headers_for_dsid: selector(c"retrieveOTPHeadersForDSID:".as_ptr()),
+                provisioning: provisioning(objc, utilities, selector),
             })
         }
     }
@@ -132,6 +191,100 @@ impl Aos {
             }
             Ok(CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned())
         }
+    }
+}
+
+impl Aos {
+    /// 등록 시작: 서버가 준 spim으로 서버에 보낼 cpim과, 끝낼 때 쓸 session을 만듭니다.
+    ///
+    /// # Safety
+    /// Apple 런타임을 불러온 스레드에서.
+    unsafe fn provision_start(&self, spim: &[u8]) -> Result<(Vec<u8>, u32), String> {
+        let provisioning = self.provisioning.as_ref().map_err(String::clone)?;
+        let (mut cpim, mut len, mut session) = (std::ptr::null_mut(), 0u32, 0u32);
+        // SAFETY: 버퍼는 말한 길이이고, 나머지는 CoreADI가 채우는 빈 칸입니다.
+        let code = unsafe {
+            (provisioning.start)(
+                DEVICE_DSID.0,
+                DEVICE_DSID.1,
+                spim.as_ptr(),
+                spim.len() as u32,
+                &mut cpim,
+                &mut len,
+                &mut session,
+            )
+        };
+        if code != 0 || cpim.is_null() {
+            return Err(format!("CoreADI wouldn't start registering this PC ({code})"));
+        }
+        // SAFETY: CoreADI가 준 버퍼와 그 길이. 베껴 두고 바로 돌려줍니다.
+        let out = unsafe {
+            let out = std::slice::from_raw_parts(cpim, len as usize).to_vec();
+            (provisioning.free)(cpim);
+            out
+        };
+        Ok((out, session))
+    }
+
+    /// 등록 끝: 서버가 준 ptm과 tk를 넣어 디스크에 씁니다. 되든 안 되든 session을 놓습니다.
+    ///
+    /// # Safety
+    /// Apple 런타임을 불러온 스레드에서.
+    unsafe fn provision_end(&self, session: u32, ptm: &[u8], tk: &[u8]) -> Result<(), String> {
+        let provisioning = self.provisioning.as_ref().map_err(String::clone)?;
+        // SAFETY: 두 버퍼는 말한 길이이고, session은 provision_start가 준 것입니다.
+        let code = unsafe {
+            let code = (provisioning.end)(session, ptm.as_ptr(), ptm.len() as u32, tk.as_ptr(), tk.len() as u32);
+            (provisioning.destroy)(session);
+            code
+        };
+        if code != 0 {
+            return Err(format!("CoreADI wouldn't finish registering this PC ({code})"));
+        }
+        Ok(())
+    }
+}
+
+/// +[AOSUtilities _performProvisioningAction:…]의 코드에서 등록 호출들의 주소를 읽습니다
+/// ([Provisioning] 참고).
+///
+/// # Safety
+/// objc는 불러온 Objective-C 런타임이고, utilities는 그 런타임의 클래스여야 합니다.
+unsafe fn provisioning(objc: HMODULE, utilities: Id, selector: unsafe extern "C" fn(*const c_char) -> Sel) -> Result<Provisioning, String> {
+    // SAFETY: 각 심볼은 Objective-C 런타임에 있는 그 시그니처의 C 함수입니다.
+    let code = unsafe {
+        let class_method: unsafe extern "C" fn(Id, Sel) -> Id = symbol(objc, c"class_getClassMethod")?;
+        let implementation: unsafe extern "C" fn(Id) -> *const u8 = symbol(objc, c"method_getImplementation")?;
+        let method = class_method(
+            utilities,
+            selector(c"_performProvisioningAction:forRequest:withDSID:andClientID:".as_ptr()),
+        );
+        if method.is_null() {
+            return Err("this AOSKit can't register the PC with Apple".into());
+        }
+        implementation(method)
+    };
+    let at = |offset: usize| -> Result<*const c_void, String> {
+        // SAFETY: 그 메서드의 코드 안입니다. call rel32가 아니면 (다른 AOSKit) 멈춥니다.
+        unsafe {
+            let call = code.add(offset);
+            if call.read() != 0xe8 {
+                return Err(format!("this AOSKit is laid out differently (at +{offset:#x})"));
+            }
+            let near = call.add(1).cast::<i32>().read_unaligned() as isize;
+            Ok(call.add(5).offset(near).cast())
+        }
+    };
+    // SAFETY: 위에서 읽은 주소들이고, 시그니처는 그 메서드가 부르는 방식 그대로입니다.
+    unsafe {
+        Ok(Provisioning {
+            start: std::mem::transmute::<*const c_void, unsafe extern "C" fn(u32, u32, *const u8, u32, *mut *mut u8, *mut u32, *mut u32) -> i32>(at(
+                CALL_START,
+            )?),
+            end: std::mem::transmute::<*const c_void, unsafe extern "C" fn(u32, *const u8, u32, *const u8, u32) -> i32>(at(CALL_END)?),
+            destroy: std::mem::transmute::<*const c_void, unsafe extern "C" fn(u32)>(at(CALL_DESTROY)?),
+            free: std::mem::transmute::<*const c_void, unsafe extern "C" fn(*mut u8)>(at(CALL_FREE)?),
+        })
     }
 }
 

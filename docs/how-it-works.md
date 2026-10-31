@@ -52,6 +52,11 @@ each request vouched for by the machine; iCloud for Windows' own component does 
 downloads it from Apple at the first sign-in (about 160 MB) and unpacks it without installing
 iCloud.
 
+A PC that has never run iCloud for Windows or iTunes isn't registered with Apple yet, and the
+component can't vouch for it. WirDrop registers it once, before the first sign-in, the way those
+programs do: Apple sends a challenge, iCloud's own code answers it, and Apple records the PC. No
+password is involved, and a PC registered earlier is left alone.
+
 Several people sharing the PC can each add an Apple ID, as each user on a Mac has one. Every phone
 lists the PC once: as one of its own devices for its owner, by name for everyone else.
 

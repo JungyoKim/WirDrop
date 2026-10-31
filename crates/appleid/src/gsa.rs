@@ -12,7 +12,7 @@ use crate::srp;
 
 const SERVICE: &str = "https://gsa.apple.com/grandslam/GsService2";
 const AUTH: &str = "https://gsa.apple.com/auth";
-const AGENT: &str = "akd/1.0 CFNetwork/3860.100.1 Darwin/25.7.0";
+pub const AGENT: &str = "akd/1.0 CFNetwork/3860.100.1 Darwin/25.7.0";
 /// 로그인하는 쪽: anisette를 만든 AOSKit의 iCloud for Windows.
 pub const CLIENT_INFO: &str = "<PC> <Windows;10.0.26100;> <com.apple.AuthKit/1 (com.apple.iCloud/7.21)>";
 /// aidc.apple.com이 받는 토큰의 앱 (Mac에서는 sharingd의 것).

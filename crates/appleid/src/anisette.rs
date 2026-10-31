@@ -9,6 +9,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
+use plist::{Dictionary, Value};
 use sha2::{Digest, Sha256};
 
 /// 32비트 AOSKit이 있는 마지막 iCloud for Windows 7.21을 Apple이 내려주는 곳과 그 SHA-256.
@@ -21,6 +22,8 @@ const SERVICES: &str = r"a\iCloud64\Common Files\Apple\Internet Services";
 const REDIRECTED: &str = r"Software\WirDrop\HKLM\SOFTWARE\Apple Inc.";
 /// 이 PC의 다른 사람 Apple ID를 위한 로그인 자체의 로컬 사용자.
 const LOCAL_USER: &str = r"anisette\local-user.txt";
+/// Apple이 기기 등록 주소를 알려 주는 곳.
+const LOOKUP: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// AOSKit이 한 번 답하는 데 걸려도 되는 시간: 첫 답은 불러오기도 하고 Apple에 기기 등록을 청할 수도
 /// 있습니다.
@@ -97,13 +100,21 @@ impl Anisette {
             local_user,
             locale: locale(),
         };
-        anisette.otp()?;
+        // 이 PC가 Apple에 기기로 등록된 적이 없으면 (iCloud나 iTunes를 켠 적 없는 PC) CoreADI는
+        // 일회용 암호를 만들지 못합니다. 그때 한 번 등록하고 다시 묻습니다.
+        if let Err(first) = anisette.otp() {
+            crate::log_line(&format!("no one-time password yet ({first}); registering this PC"));
+            say!("registering this PC with Apple… (once)");
+            anisette.provision().await?;
+            anisette.otp()?;
+            say!("this PC is registered with Apple");
+        }
         Ok(anisette)
     }
 
-    /// AOSKit의 새 일회용 암호와 기기 ID.
-    fn otp(&mut self) -> Result<(String, String), String> {
-        writeln!(self.input, "otp")
+    /// 도우미에게 한 줄 묻고 받은 JSON 답.
+    fn ask(&mut self, request: &str) -> Result<serde_json::Value, String> {
+        writeln!(self.input, "{request}")
             .and_then(|()| self.input.flush())
             .map_err(|e| format!("anisette helper: {e}"))?;
         let line = match self.answers.recv_timeout(ANSWER_WITHIN) {
@@ -111,11 +122,113 @@ impl Anisette {
             Err(RecvTimeoutError::Timeout) => return Err("Apple's anisette didn't answer".into()),
             Err(RecvTimeoutError::Disconnected) => return Err("the anisette helper stopped".into()),
         };
-        let answer: serde_json::Value = serde_json::from_str(line.trim()).map_err(|_| "the anisette helper stopped".to_string())?;
+        serde_json::from_str(line.trim()).map_err(|_| "the anisette helper stopped".to_string())
+    }
+
+    /// AOSKit의 새 일회용 암호와 기기 ID.
+    fn otp(&mut self) -> Result<(String, String), String> {
+        let answer = self.ask("otp")?;
         match (answer["md"].as_str(), answer["mdm"].as_str()) {
             (Some(md), Some(mdm)) => Ok((md.to_string(), mdm.to_string())),
             _ => Err(format!("anisette: {}", answer["error"].as_str().unwrap_or("no answer"))),
         }
+    }
+
+    /// 이 PC를 Apple에 기기로 등록합니다. Mac과 iPhone은 공장에서 된 채로 오고, Windows에서는
+    /// iCloud for Windows나 iTunes를 처음 켤 때 일어나는 일입니다. 둘 다 없는 PC에서는 로그인이
+    /// 일회용 암호를 만들지 못하므로 WirDrop이 같은 것을 합니다: Apple이 준 spim을 CoreADI에
+    /// 넣어 cpim을 만들어 보내고, Apple이 돌려준 ptm과 tk로 끝냅니다. 암호는 쓰지 않습니다.
+    async fn provision(&mut self) -> Result<(), String> {
+        let (start, finish) = self.provisioning_urls().await?;
+        let spim = text(&self.call(&start, Dictionary::new()).await?, "spim")?;
+        let answer = self.ask(&format!("provision-start {spim}"))?;
+        let (Some(cpim), Some(session)) = (answer["cpim"].as_str(), answer["session"].as_u64()) else {
+            return Err(format!("anisette: {}", answer["error"].as_str().unwrap_or("no answer")));
+        };
+        let (cpim, session) = (cpim.to_string(), session);
+        let mut request = Dictionary::new();
+        request.insert("cpim".into(), Value::String(cpim));
+        let done = self.call(&finish, request).await?;
+        let (ptm, tk) = (text(&done, "ptm")?, text(&done, "tk")?);
+        let answer = self.ask(&format!("provision-end {session} {ptm} {tk}"))?;
+        if answer["ok"].as_bool() != Some(true) {
+            return Err(format!("anisette: {}", answer["error"].as_str().unwrap_or("no answer")));
+        }
+        Ok(())
+    }
+
+    /// 등록을 시작하고 끝내는 Apple의 주소. 그때그때 Apple에 물어봅니다.
+    async fn provisioning_urls(&self) -> Result<(String, String), String> {
+        let mut get = crate::http::client().get(LOOKUP);
+        for (name, value) in self.plain_headers() {
+            get = get.header(name, value);
+        }
+        let bytes = get
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| e.to_string())?
+            .bytes()
+            .await
+            .map_err(|e| e.to_string())?;
+        let reply: Value = plist::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let urls = reply
+            .as_dictionary()
+            .and_then(|d| d.get("urls"))
+            .and_then(Value::as_dictionary)
+            .ok_or("Apple didn't say where to register this PC")?;
+        Ok((text(urls, "midStartProvisioning")?, text(urls, "midFinishProvisioning")?))
+    }
+
+    /// 등록 요청 하나: plist를 보내고 Apple의 "Response"를 받습니다.
+    async fn call(&self, url: &str, request: Dictionary) -> Result<Dictionary, String> {
+        let mut envelope = Dictionary::new();
+        envelope.insert("Header".into(), Value::Dictionary(Dictionary::new()));
+        envelope.insert("Request".into(), Value::Dictionary(request));
+        let mut body = Vec::new();
+        plist::to_writer_xml(&mut body, &Value::Dictionary(envelope)).map_err(|e| e.to_string())?;
+        let mut post = crate::http::client().post(url).header("Content-Type", "text/x-xml-plist").body(body);
+        for (name, value) in self.plain_headers() {
+            post = post.header(name, value);
+        }
+        let bytes = post
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| e.to_string())?
+            .bytes()
+            .await
+            .map_err(|e| e.to_string())?;
+        let reply: Value = plist::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let response = reply
+            .as_dictionary()
+            .and_then(|d| d.get("Response"))
+            .and_then(Value::as_dictionary)
+            .ok_or("Apple's answer has no Response")?;
+        let status = response.get("Status").and_then(Value::as_dictionary).unwrap_or(response);
+        match status.get("ec").and_then(Value::as_signed_integer) {
+            Some(0) | None => Ok(response.clone()),
+            Some(code) => Err(format!(
+                "{} ({code})",
+                status.get("em").and_then(Value::as_string).unwrap_or("Apple refused to register this PC")
+            )),
+        }
+    }
+
+    /// 일회용 암호 없이도 되는, 이 PC가 누구인지 말하는 헤더들 (등록할 때 씁니다). Apple은 이것들이
+    /// 다 있어야 답합니다: 빠지면 401입니다.
+    fn plain_headers(&self) -> [(&'static str, String); 9] {
+        [
+            ("Accept", "*/*".into()),
+            ("User-Agent", crate::gsa::AGENT.to_string()),
+            ("X-Apple-I-Client-Time", utc_now()),
+            ("X-Apple-I-MD-LU", self.local_user.clone()),
+            ("X-Apple-I-SRL-NO", "0".into()),
+            ("X-Apple-I-TimeZone", time_zone()),
+            ("X-Apple-Locale", self.locale.clone()),
+            ("X-Mme-Device-Id", self.device.clone()),
+            ("X-MMe-Client-Info", crate::gsa::CLIENT_INFO.to_string()),
+        ]
     }
 
     /// 새 일회용 암호를 담은 anisette 헤더.
@@ -162,6 +275,15 @@ impl Anisette {
 
 fn local_app_data() -> PathBuf {
     PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+}
+
+/// 사전에서 key 아래의 글.
+fn text(dictionary: &Dictionary, key: &str) -> Result<String, String> {
+    dictionary
+        .get(key)
+        .and_then(Value::as_string)
+        .map(str::to_string)
+        .ok_or(format!("Apple's answer has no {key}"))
 }
 
 /// iCloud for Windows를 풀어 둔 곳: APPLEID_ICLOUD, 없으면 %LOCALAPPDATA%\WirDrop\icloud.

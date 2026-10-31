@@ -12,6 +12,9 @@ publish = false
 name = "appleid-anisette"
 path = "src/main.rs"
 
+[dependencies]
+base64 = "0.22"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
