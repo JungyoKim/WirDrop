@@ -64,8 +64,7 @@ An 80 MB (79.75 MB) video between the PC and an iPhone a metre away:
 | iPhone → PC | 3.1 to 3.6 s (22 to 26 MB/s) | 22 s |
 | PC → iPhone | 3.1 to 3.3 s after the iPhone accepts (24 to 26 MB/s) | 14.1 s |
 
-A Mac receives the same video in about 7 seconds. What limits it now is the iPhone, which spends
-only 65 to 77% of a transfer on the shared channel.
+What limits it now is the iPhone, which spends only 65 to 77% of a transfer on the shared channel.
 
 ## Known limits
 

@@ -43,7 +43,9 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ShowLanguageDialog=no
-; A running WirDrop (the tray app, the engine, the Explorer menu's surrogate) holds its files.
+; A running WirDrop (the tray app, the engine, the Explorer menu's surrogate) holds its files. The
+; engine service and its usbfwd run in another session, out of Restart Manager's reach, so
+; PrepareToInstall below stops them first.
 CloseApplications=force
 RestartApplications=no
 
@@ -83,4 +85,20 @@ Filename: "{app}\WirDrop.exe"; Parameters: "--setup --menu off --service off --d
 [UninstallDelete]
 ; Updates add and replace files the install didn't list.
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// 이미 설치된 WirDrop 위에 설치할 때: 트레이 앱을 끝내고 엔진 서비스를 멈춘 뒤, 그래도 남은
+// WirDrop과 usbfwd를 끝냅니다. 설치가 끝나면 [Run]이 서비스를 다시 켜고 앱을 띄웁니다.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  if FileExists(ExpandConstant('{app}\WirDrop.exe')) then
+    Exec(ExpandConstant('{app}\WirDrop.exe'), '--exit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // net stop은 서비스가 멈출 때까지 기다립니다 (없거나 이미 멈췄으면 그냥 끝납니다).
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop WirDropEngine', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM usbfwd.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM WirDrop.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Result := '';
+end;
 

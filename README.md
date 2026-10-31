@@ -91,8 +91,8 @@ Windows.
 <details>
 <summary><b>How fast is it?</b></summary>
 
-An 80 MB video takes about 3 seconds either way (22 to 26 MB/s) with the iPhone a metre away. A Mac
-takes about 7. See [How it works](docs/how-it-works.md#speed).
+An 80 MB video takes about 3 seconds either way (22 to 26 MB/s) with the iPhone a metre away. See
+[How it works](docs/how-it-works.md#speed).
 </details>
 
 <details>

@@ -91,8 +91,8 @@ Windows가 씁니다.
 <details>
 <summary><b>얼마나 빠른가요?</b></summary>
 
-1 m 거리의 iPhone과 80 MB 영상을 주고받는 데 양방향 모두 약 3초(22~26 MB/s)가 걸립니다. Mac은
-약 7초입니다. [동작 원리](../docs/ko/how-it-works.md#속도)를 보세요.
+1 m 거리의 iPhone과 80 MB 영상을 주고받는 데 양방향 모두 약 3초(22~26 MB/s)가 걸립니다.
+[동작 원리](../docs/ko/how-it-works.md#속도)를 보세요.
 </details>
 
 <details>
