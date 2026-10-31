@@ -23,10 +23,31 @@ mod thumbs;
 mod window;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub use spring::{Motion, Spring};
 pub use window::full_screen;
+
+/// 화면 문구를 영어로 쓸지. WIRDROP_LANG(ko 또는 en)이 있으면 그것을, 없으면 Windows 표시 언어를
+/// 따릅니다: 한국어면 한국어, 그 밖에는 영어. 한 번 정하면 프로세스가 끝날 때까지 같습니다.
+pub fn english() -> bool {
+    static ENGLISH: OnceLock<bool> = OnceLock::new();
+    *ENGLISH.get_or_init(|| match std::env::var("WIRDROP_LANG") {
+        Ok(lang) => !lang.trim().to_ascii_lowercase().starts_with("ko"),
+        Err(_) => {
+            // SAFETY: 인자 없는 조회.
+            let lang = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+            // 아래 10비트가 주 언어이고 0x12가 한국어입니다.
+            lang & 0x3ff != 0x12
+        }
+    })
+}
+
+/// 지금 언어의 문구 (한국어, 영어 순).
+fn t(ko: &'static str, en: &'static str) -> &'static str {
+    if english() { en } else { ko }
+}
 
 /// Framework7 Icons의 아이콘 (tools/make-icons.py가 각각을 U+E000 + 여기의 번호에 둡니다).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

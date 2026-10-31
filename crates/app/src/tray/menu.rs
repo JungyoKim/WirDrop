@@ -55,14 +55,14 @@ pub fn entries(view: &TrayView) -> Vec<Entry> {
     };
     let status = status.glyph(if view.ready { READY } else { WARNING });
     let Some(s) = &view.snapshot else {
-        return vec![status, Entry::separator(), Entry::item("exit", "종료").glyph(POWER)];
+        return vec![status, Entry::separator(), Entry::item("exit", t!("종료", "Quit")).glyph(POWER)];
     };
     let mut items = vec![status];
     items.extend(transfer_items(s));
     items.extend([
         Entry::separator(),
-        Entry::sub("받기", receive_items(s)).glyph(RECEIVE),
-        Entry::item("open-dir", "폴더").glyph(FOLDER),
+        Entry::sub(t!("받기", "Receive"), receive_items(s)).glyph(RECEIVE),
+        Entry::item("open-dir", t!("폴더", "Folder")).glyph(FOLDER),
         Entry::item("save-dir", s.settings.save_dir.display().to_string()).glyph(SAVE),
         Entry::separator(),
     ]);
@@ -70,10 +70,10 @@ pub fn entries(view: &TrayView) -> Vec<Entry> {
     items.extend([
         Entry::sub("Apple ID", apple_items(s)).glyph(ACCOUNT),
         Entry::separator(),
-        Entry::sub("알림 위치", island_items(s)).glyph(BELL),
-        Entry::toggle("autostart", "부팅 시 켜기", s.autostart),
+        Entry::sub(t!("알림 위치", "Notification position"), island_items(s)).glyph(BELL),
+        Entry::toggle("autostart", t!("부팅 시 켜기", "Open at boot"), s.autostart),
         Entry::separator(),
-        Entry::item("exit", "종료").glyph(POWER),
+        Entry::item("exit", t!("종료", "Quit")).glyph(POWER),
     ]);
     items
 }
@@ -85,11 +85,11 @@ fn receive_items(s: &Snapshot) -> Vec<Entry> {
     let can_contacts = s.apple_id.present();
     let contacts = on && s.settings.contacts_only && can_contacts;
     vec![
-        Entry::radio("receive:off", "끔", !on),
-        Entry::radio("receive:contacts", "연락처만", contacts).enabled(can_contacts),
-        Entry::radio("receive:everyone", "모든 사람", on && !contacts),
+        Entry::radio("receive:off", t!("끔", "Off"), !on),
+        Entry::radio("receive:contacts", t!("연락처만", "Contacts only"), contacts).enabled(can_contacts),
+        Entry::radio("receive:everyone", t!("모든 사람", "Everyone"), on && !contacts),
         Entry::separator(),
-        Entry::sub("기억한 기기", people_items(s)).glyph(PEOPLE),
+        Entry::sub(t!("기억한 기기", "Known devices"), people_items(s)).glyph(PEOPLE),
     ]
 }
 
@@ -101,14 +101,14 @@ fn transfer_items(s: &Snapshot) -> Vec<Entry> {
         items.push(Entry::sub(format!("{} · {}", ask.sender, ask.what), answers(ask.id)).glyph(device_glyph(Some(&ask.model))));
     }
     for sender in &s.receiving {
-        items.push(Entry::label(format!("{sender}에서 받는 중…")).glyph(RECEIVE));
+        items.push(Entry::label(tf!("{sender}에서 받는 중…", "Receiving from {sender}…")).glyph(RECEIVE));
     }
     for job in s.jobs.iter().filter(|j| !j.state.is_final()) {
         let done = match job.state {
             crate::ipc::SendState::Progress { sent, total } if total > 0 => format!(" · {}%", sent * 100 / total),
             _ => String::new(),
         };
-        items.push(Entry::label(format!("{}에 보내는 중{done}", job.target)).glyph(SEND));
+        items.push(Entry::label(tf!("{}에 보내는 중{done}", "Sending to {}{done}", job.target)).glyph(SEND));
     }
     if !items.is_empty() {
         items.insert(0, Entry::separator());
@@ -119,9 +119,9 @@ fn transfer_items(s: &Snapshot) -> Vec<Entry> {
 /// 받기 요청에 대한 답들 (카드의 버튼과 같습니다).
 fn answers(id: u64) -> Vec<Entry> {
     vec![
-        Entry::item(format!("press:accept:{id}"), "수락").glyph(CHECK),
-        Entry::item(format!("press:always:{id}"), "항상 수락").glyph(ALWAYS),
-        Entry::item(format!("press:decline:{id}"), "거절").glyph(CANCEL),
+        Entry::item(format!("press:accept:{id}"), t!("수락", "Accept")).glyph(CHECK),
+        Entry::item(format!("press:always:{id}"), t!("항상 수락", "Always accept")).glyph(ALWAYS),
+        Entry::item(format!("press:decline:{id}"), t!("거절", "Decline")).glyph(CANCEL),
     ]
 }
 
@@ -130,7 +130,7 @@ pub fn ask_entries(req: &crate::ipc::IncomingInfo) -> Vec<Entry> {
     let what = super::text::describe(&req.files);
     let mut items = vec![
         Entry::label(req.sender.clone()).glyph(device_glyph(Some(&req.model))).handle(),
-        Entry::label(format!("{what}{} 보내려고 합니다", super::text::eul(&what))),
+        Entry::label(super::text::wants_to_share(&what)),
         Entry::separator(),
     ];
     items.extend(answers(req.id));
@@ -155,8 +155,8 @@ pub fn notice_entries(glyph: char, title: &str, detail: &str, buttons: &[(&str, 
 pub fn share_entries(view: &TrayView, files: &[PathBuf]) -> (Vec<Entry>, Vec<Device>, String) {
     let what = match files {
         [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        many if many.iter().any(|f| f.is_dir()) => format!("항목 {}개", many.len()),
-        many => format!("파일 {}개", many.len()),
+        many if many.iter().any(|f| f.is_dir()) => tf!("항목 {}개", "{} items", many.len()),
+        many => tf!("파일 {}개", "{} files", many.len()),
     };
     let devices: Vec<Device> = view
         .snapshot
@@ -166,7 +166,7 @@ pub fn share_entries(view: &TrayView, files: &[PathBuf]) -> (Vec<Entry>, Vec<Dev
     let note = if !view.ready {
         view.status.clone()
     } else if devices.is_empty() {
-        "주변 기기를 찾는 중…".to_string()
+        t!("주변 기기를 찾는 중…", "Looking for nearby devices…").to_string()
     } else {
         String::new()
     };
@@ -186,7 +186,7 @@ pub fn share_entries(view: &TrayView, files: &[PathBuf]) -> (Vec<Entry>, Vec<Dev
 fn people_items(s: &Snapshot) -> Vec<Entry> {
     let mut items = Vec::new();
     if s.settings.people.is_empty() {
-        items.push(Entry::label("아직 받은 적이 없습니다"));
+        items.push(Entry::label(t!("아직 받은 적이 없습니다", "Nothing received yet")));
     }
     for (i, p) in s.settings.people.iter().enumerate() {
         let rule = |key: &str, text: &str, rule: Rule| Entry::radio(format!("rule:{i}:{key}"), text, p.rule == rule);
@@ -201,11 +201,11 @@ fn people_items(s: &Snapshot) -> Vec<Entry> {
             Entry::sub(
                 label,
                 vec![
-                    rule("default", "매번 묻기", Rule::Default),
-                    rule("accept", "항상 수락", Rule::Accept),
-                    rule("block", "차단", Rule::Block),
+                    rule("default", t!("매번 묻기", "Always ask"), Rule::Default),
+                    rule("accept", t!("항상 수락", "Always accept"), Rule::Accept),
+                    rule("block", t!("차단", "Block"), Rule::Block),
                     Entry::separator(),
-                    Entry::item(format!("forget:{i}"), "목록에서 지우기").glyph(DELETE),
+                    Entry::item(format!("forget:{i}"), t!("목록에서 지우기", "Remove from list")).glyph(DELETE),
                 ],
             )
             .glyph(glyph),
@@ -244,15 +244,15 @@ fn model_items(s: &Snapshot) -> Vec<Entry> {
 fn island_items(s: &Snapshot) -> Vec<Entry> {
     use wirdrop_island::Position;
     let label = |p: Position| match p {
-        Position::TopLeft => "왼쪽 위",
-        Position::Top => "위",
-        Position::TopRight => "오른쪽 위",
-        Position::Left => "왼쪽",
-        Position::Center => "가운데",
-        Position::Right => "오른쪽",
-        Position::BottomLeft => "왼쪽 아래",
-        Position::Bottom => "아래",
-        Position::BottomRight => "오른쪽 아래",
+        Position::TopLeft => t!("왼쪽 위", "Top left"),
+        Position::Top => t!("위", "Top"),
+        Position::TopRight => t!("오른쪽 위", "Top right"),
+        Position::Left => t!("왼쪽", "Left"),
+        Position::Center => t!("가운데", "Center"),
+        Position::Right => t!("오른쪽", "Right"),
+        Position::BottomLeft => t!("왼쪽 아래", "Bottom left"),
+        Position::Bottom => t!("아래", "Bottom"),
+        Position::BottomRight => t!("오른쪽 아래", "Bottom right"),
     };
     let mut items = Vec::new();
     for (i, p) in Position::ALL.into_iter().enumerate() {
@@ -274,21 +274,23 @@ fn apple_items(s: &Snapshot) -> Vec<Entry> {
             Entry::sub(
                 account.label.clone(),
                 vec![
-                    Entry::item(format!("signin:{i}"), "다시 로그인…").glyph(ACCOUNT).enabled(a.can_sign_in),
-                    Entry::item(format!("signout:{i}"), "로그아웃…").glyph(SIGN_OUT),
+                    Entry::item(format!("signin:{i}"), t!("다시 로그인…", "Sign in again…"))
+                        .glyph(ACCOUNT)
+                        .enabled(a.can_sign_in),
+                    Entry::item(format!("signout:{i}"), t!("로그아웃…", "Sign out…")).glyph(SIGN_OUT),
                 ],
             )
             .glyph(PERSON)
         })
         .collect();
     if items.is_empty() {
-        items.push(Entry::label("로그인되어 있지 않습니다"));
+        items.push(Entry::label(t!("로그인되어 있지 않습니다", "Not signed in")));
     }
     items.push(Entry::separator());
     let sign_in = if a.present() {
-        "다른 Apple ID 추가…"
+        t!("다른 Apple ID 추가…", "Add another Apple ID…")
     } else {
-        "Apple ID로 로그인…"
+        t!("Apple ID로 로그인…", "Sign in with Apple ID…")
     };
     items.push(Entry::item("signin:new", sign_in).glyph(ADD).enabled(a.can_sign_in));
     items
@@ -358,7 +360,9 @@ pub fn pick(key: &str, view: &TrayView) -> Option<Picked> {
         }
         "save-dir" => {
             return dialog(Box::new(|| {
-                let dir = crate::win::pick(0, "받은 파일을 저장할 폴더", Pick::Folder).into_iter().next()?;
+                let dir = crate::win::pick(0, t!("받은 파일을 저장할 폴더", "Folder for received files"), Pick::Folder)
+                    .into_iter()
+                    .next()?;
                 Some(MenuCmd::Change(Change::SaveDir(dir)))
             }));
         }

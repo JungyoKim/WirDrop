@@ -102,6 +102,10 @@ pub struct IncomingInfo {
     pub icon: Option<PathBuf>,
 }
 
+/// 받을 기기가 나타나지 않아 보내기가 멈춘 까닭 ([SendState::Failed]). 트레이가 지금 언어로
+/// 바꿔 보여 줍니다.
+pub const NOT_FOUND: &str = "device not found";
+
 /// 보내기 한 건의 상태.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "s", rename_all = "snake_case")]

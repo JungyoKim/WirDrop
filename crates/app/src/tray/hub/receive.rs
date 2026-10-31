@@ -85,7 +85,7 @@ impl Hub {
         }
         ask.drawn = Some(Instant::now());
         if let Some(c) = &self.cards {
-            c.receive_progress(id, rate::bar(done, ask.total(), ask.rate.speed(), "받는 중…"));
+            c.receive_progress(id, rate::bar(done, ask.total(), ask.rate.speed(), t!("받는 중…", "Receiving…")));
         }
     }
 
@@ -107,11 +107,11 @@ impl Hub {
             let open = if paths.len() > 1 { first.parent().unwrap_or(first) } else { first };
             let (open, reveal) = (format!("open:{}", open.display()), format!("reveal:{}", first.display()));
             let what = text::file_line(&paths);
-            let buttons = [("열기", open.as_str()), ("폴더 열기", reveal.as_str())];
+            let buttons = [(t!("열기", "Open"), open.as_str()), (t!("폴더 열기", "Show in Folder"), reveal.as_str())];
             self.notice(
                 &format!("recv-{id}-end"),
                 menu::RECEIVE_GLYPH,
-                &format!("{sender}에서 받았습니다"),
+                &tf!("{sender}에서 받았습니다", "Received from {sender}"),
                 &what,
                 &buttons,
             );

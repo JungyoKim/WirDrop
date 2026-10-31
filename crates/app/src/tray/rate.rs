@@ -41,7 +41,10 @@ pub fn bar(done: u64, total: u64, speed: Option<f64>, idle: &str) -> Progress {
         size(done)
     };
     let status = match speed.filter(|s| *s >= 1.0) {
-        Some(s) if total > done => format!("{}/s · {} 남음", size(s as u64), duration((total - done) as f64 / s)),
+        Some(s) if total > done => {
+            let left = duration((total - done) as f64 / s);
+            tf!("{}/s · {left} 남음", "{}/s · {left} left", size(s as u64))
+        }
         Some(s) => format!("{}/s", size(s as u64)),
         None => idle.to_string(),
     };
@@ -57,7 +60,8 @@ pub fn waiting(status: &str) -> Progress {
     }
 }
 
-/// 끝난 전송의 요약 "79.8 MB · 6.3초 · 평균 12.7 MB/s". took은 수락부터 마지막 바이트까지입니다.
+/// 끝난 전송의 요약 "79.8 MB · 6.3초 · 평균 12.7 MB/s" ("79.8 MB · 6.3 s · avg 12.7 MB/s"). took은
+/// 수락부터 마지막 바이트까지입니다.
 pub fn summary(bytes: u64, took: Duration) -> String {
     let secs = took.as_secs_f64();
     if bytes == 0 {
@@ -65,23 +69,29 @@ pub fn summary(bytes: u64, took: Duration) -> String {
     } else if secs < 0.5 {
         size(bytes)
     } else {
-        format!("{} · {} · 평균 {}/s", size(bytes), elapsed(secs), size((bytes as f64 / secs) as u64))
+        let (amount, took, speed) = (size(bytes), elapsed(secs), size((bytes as f64 / secs) as u64));
+        tf!("{amount} · {took} · 평균 {speed}/s", "{amount} · {took} · avg {speed}/s")
     }
 }
 
-/// 1분 안쪽은 "6.3초", 그 위는 [duration]처럼.
+/// 1분 안쪽은 "6.3초" ("6.3 s"), 그 위는 [duration]처럼.
 fn elapsed(secs: f64) -> String {
-    if secs < 59.95 { format!("{secs:.1}초") } else { duration(secs) }
+    if secs < 59.95 {
+        tf!("{secs:.1}초", "{secs:.1} s")
+    } else {
+        duration(secs)
+    }
 }
 
-/// "8초", "1분 20초", "1시간 5분".
+/// "8초", "1분 20초", "1시간 5분" ("8 s", "1 min 20 s", "1 h 5 min").
 fn duration(secs: f64) -> String {
     let s = secs.ceil().max(1.0) as u64;
+    let (m, h) = (s / 60, s / 3600);
     match s {
-        0..60 => format!("{s}초"),
-        60..3600 if s.is_multiple_of(60) => format!("{}분", s / 60),
-        60..3600 => format!("{}분 {}초", s / 60, s % 60),
-        _ => format!("{}시간 {}분", s / 3600, s % 3600 / 60),
+        0..60 => tf!("{s}초", "{s} s"),
+        60..3600 if s.is_multiple_of(60) => tf!("{m}분", "{m} min"),
+        60..3600 => tf!("{m}분 {}초", "{m} min {} s", s % 60),
+        _ => tf!("{h}시간 {}분", "{h} h {} min", s % 3600 / 60),
     }
 }
 
@@ -92,15 +102,15 @@ mod tests {
     #[test]
     fn summary_has_the_time() {
         let s = summary(79_751_788, Duration::from_millis(6340));
-        assert!(s.contains("6.3초") && s.contains("평균"), "{s}");
-        assert!(summary(79_751_788, Duration::from_secs(95)).contains("1분 35초"));
+        assert!(s.contains(t!("6.3초", "6.3 s")) && s.contains(t!("평균", "avg")), "{s}");
+        assert!(summary(79_751_788, Duration::from_secs(95)).contains(t!("1분 35초", "1 min 35 s")));
     }
 
     #[test]
     fn a_bar_says_how_far_and_how_fast() {
-        let p = bar(25, 100, Some(10.0), "받는 중…");
+        let p = bar(25, 100, Some(10.0), "");
         assert_eq!(p.fraction, Some(0.25));
-        assert!(p.status.contains("남음"), "{}", p.status);
-        assert_eq!(bar(0, 0, None, "받는 중…").fraction, None);
+        assert!(p.status.contains(t!("남음", "left")), "{}", p.status);
+        assert_eq!(bar(0, 0, None, "").fraction, None);
     }
 }

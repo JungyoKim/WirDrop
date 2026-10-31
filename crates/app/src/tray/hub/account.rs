@@ -6,8 +6,8 @@ impl Hub {
         if self.signing_in {
             self.notify(
                 "signin-busy",
-                "이미 로그인하는 중입니다",
-                "지금 하는 로그인이 끝나면 다시 해 주세요.",
+                t!("이미 로그인하는 중입니다", "Already signing in"),
+                t!("지금 하는 로그인이 끝나면 다시 해 주세요.", "Try again when this sign-in is done."),
                 &[],
             );
             return;
@@ -19,8 +19,11 @@ impl Hub {
             self.signing_in = false;
             self.notify(
                 "signin-end",
-                "Apple ID에 로그인할 수 없습니다",
-                "아일랜드를 띄우지 못했습니다. WirDrop을 다시 시작해 주세요.",
+                t!("Apple ID에 로그인할 수 없습니다", "Can't sign in to Apple ID"),
+                t!(
+                    "아일랜드를 띄우지 못했습니다. WirDrop을 다시 시작해 주세요.",
+                    "The island didn't open. Restart WirDrop."
+                ),
                 &[],
             );
             return;
@@ -42,21 +45,25 @@ impl Hub {
             Progress::Failed { reason, .. } => tracing::warn!("Apple ID sign-in failed: {reason}"),
             Progress::Cancelled => tracing::info!("Apple ID sign-in: the dialog was closed"),
         }
+        let (signed_in, not_signed_in, again_label) = (
+            t!("Apple ID에 로그인했습니다", "Signed in to Apple ID"),
+            t!("Apple ID에 로그인하지 못했습니다", "Couldn't sign in to Apple ID"),
+            t!("다시 로그인", "Sign In Again"),
+        );
+        let later = |label: &str| {
+            tf!(
+                "{label} · 인증서는 몇 분 안에 자동으로 받습니다.",
+                "{label} · The certificate arrives in a few minutes."
+            )
+        };
         match &progress {
-            Progress::Done { label } => self.notice("signin-end", menu::ACCOUNT_GLYPH, "Apple ID에 로그인했습니다", label, &[]),
+            Progress::Done { label } => self.notice("signin-end", menu::ACCOUNT_GLYPH, signed_in, label, &[]),
             Progress::Later { label, .. } => {
-                let line = format!("{label} · 인증서는 몇 분 안에 받습니다.");
-                self.notice("signin-end", menu::ACCOUNT_GLYPH, "Apple ID에 로그인했습니다", &line, &[]);
+                self.notice("signin-end", menu::ACCOUNT_GLYPH, signed_in, &later(label), &[]);
             }
             Progress::Failed { root, reason } => {
                 let again = format!("signin:{}", root.as_ref().map_or("new".to_string(), |r| r.display().to_string()));
-                self.notice(
-                    "signin-end",
-                    menu::WARNING_GLYPH,
-                    "Apple ID에 로그인하지 못했습니다",
-                    reason,
-                    &[("다시 로그인", &again)],
-                );
+                self.notice("signin-end", menu::WARNING_GLYPH, not_signed_in, reason, &[(again_label, &again)]);
             }
             _ => {}
         }
@@ -70,22 +77,17 @@ impl Hub {
             Progress::Status(status) => c.signing_in(&status),
             Progress::Done { label } => {
                 self.signing_in = false;
-                c.signed_in(true, "Apple ID에 로그인했습니다", &label, &[]);
+                c.signed_in(true, signed_in, &label, &[]);
                 self.restart_engine();
             }
             Progress::Later { label, .. } => {
                 self.signing_in = false;
-                c.signed_in(
-                    true,
-                    "Apple ID에 로그인했습니다",
-                    &format!("{label} · 인증서는 몇 분 안에 자동으로 받습니다."),
-                    &[],
-                );
+                c.signed_in(true, signed_in, &later(&label), &[]);
             }
             Progress::Failed { root, reason } => {
                 self.signing_in = false;
                 let again = format!("signin:{}", root.as_ref().map_or("new".to_string(), |r| r.display().to_string()));
-                c.signed_in(false, "Apple ID에 로그인하지 못했습니다", &reason, &[("다시 로그인", again.as_str())]);
+                c.signed_in(false, not_signed_in, &reason, &[(again_label, again.as_str())]);
             }
             Progress::Cancelled => {
                 self.signing_in = false;
@@ -99,6 +101,7 @@ impl Hub {
     pub(super) fn renewed(&mut self, code: i32, root: PathBuf, who: String) {
         tracing::info!("sign-in renewal of {}: exit {code}", root.display());
         let again = format!("signin:{}", root.display());
+        let again_label = t!("다시 로그인", "Sign In Again");
         if code == 0 {
             // 갱신이 마무리한 로그인은 엔진에 없는 신원을 가져옵니다: 지금 있는 Apple ID들로 다시
             // 시작합니다 (같으면 아무것도 하지 않습니다).
@@ -110,10 +113,11 @@ impl Hub {
             match code {
                 0 if crate::paths::identity_dir(&root).is_some() => {
                     self.pending_signins.remove(&root);
+                    let got = t!("AirDrop 인증서를 받았습니다", "Got the AirDrop certificate");
                     if let Some(c) = &self.cards {
-                        c.signed_in(true, "AirDrop 인증서를 받았습니다", &who, &[]);
+                        c.signed_in(true, got, &who, &[]);
                     }
-                    self.notice("signin-end", menu::ACCOUNT_GLYPH, "AirDrop 인증서를 받았습니다", &who, &[]);
+                    self.notice("signin-end", menu::ACCOUNT_GLYPH, got, &who, &[]);
                     return;
                 }
                 2 => {
@@ -124,9 +128,9 @@ impl Hub {
                     self.pending_signins.remove(&root);
                     self.notify(
                         "apple-id",
-                        "AirDrop 인증서를 받지 못했습니다",
-                        &format!("{who} · 다시 로그인해 주세요."),
-                        &[("다시 로그인", &again)],
+                        t!("AirDrop 인증서를 받지 못했습니다", "Couldn't get the AirDrop certificate"),
+                        &tf!("{who} · 다시 로그인해 주세요.", "{who} · Sign in again."),
+                        &[(again_label, &again)],
                     );
                     return;
                 }
@@ -135,9 +139,9 @@ impl Hub {
         if code == 2 {
             self.notify(
                 "apple-id",
-                "Apple ID에 다시 로그인해 주세요",
-                &format!("{who}의 인증을 갱신하지 못했습니다."),
-                &[("로그인", &again)],
+                t!("Apple ID에 다시 로그인해 주세요", "Sign in to Apple ID again"),
+                &tf!("{who}의 인증을 갱신하지 못했습니다.", "Couldn't renew the sign-in for {who}."),
+                &[(t!("로그인", "Sign In"), &again)],
             );
         }
     }

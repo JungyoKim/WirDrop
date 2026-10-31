@@ -8,7 +8,7 @@ use wirdrop_island::{Button, Card, Glyph, Handle, Island, Kind, Position, Progre
 
 use super::hub::HubEvent;
 use super::rate;
-use super::text::{describe, eul, file_line, names, reason_text};
+use super::text::{describe, file_line, names, reason_text, wants_to_share};
 use crate::ipc::{IncomingInfo, SendState};
 
 pub struct Cards {
@@ -44,9 +44,9 @@ impl Cards {
             tag: "island-at".into(),
             kind: Kind::Info,
             glyph: Some(Glyph::Info),
-            title: "알림 위치".into(),
-            detail: "알림이 여기에 나타납니다.".into(),
-            brief: "알림 위치".into(),
+            title: t!("알림 위치", "Notification position").into(),
+            detail: t!("알림이 여기에 나타납니다.", "Notifications appear here.").into(),
+            brief: t!("알림 위치", "Notification position").into(),
             ..Card::default()
         });
     }
@@ -75,13 +75,13 @@ impl Cards {
             glyph: Some(Glyph::device(&req.model)),
             picture: req.icon.clone(),
             title: req.sender.clone(),
-            detail: format!("{what}{} 보내려고 합니다.", eul(&what)),
+            detail: format!("{}.", wants_to_share(&what)),
             status,
             brief: req.sender.clone(),
             buttons: vec![
-                Button::new("거절", &format!("decline:{id}"), false),
-                Button::new("항상 수락", &format!("always:{id}"), false),
-                Button::new("수락", &format!("accept:{id}"), true),
+                Button::new(t!("거절", "Decline"), &format!("decline:{id}"), false),
+                Button::new(t!("항상 수락", "Always Accept"), &format!("always:{id}"), false),
+                Button::new(t!("수락", "Accept"), &format!("accept:{id}"), true),
             ],
             ..Card::default()
         });
@@ -96,10 +96,10 @@ impl Cards {
             kind: Kind::Transfer,
             glyph: Some(Glyph::Receive),
             picture: req.icon.clone(),
-            title: format!("{}에서 받는 중", req.sender),
+            title: tf!("{}에서 받는 중", "Receiving from {}", req.sender),
             detail: format!("{} · {}", describe(&req.files), names(&req.files)),
-            brief: "받는 중".into(),
-            progress: Some(rate::bar(0, total, None, "받는 중…")),
+            brief: t!("받는 중", "Receiving").into(),
+            progress: Some(rate::bar(0, total, None, t!("받는 중…", "Receiving…"))),
             launch: Some(format!("recvdir:{id}")),
             cancel: Some(format!("stop:{id}")),
             ..Card::default()
@@ -130,13 +130,13 @@ impl Cards {
             } else {
                 icon.map(Path::to_path_buf)
             },
-            title: format!("{sender}에서 받았습니다"),
+            title: tf!("{sender}에서 받았습니다", "Received from {sender}"),
             detail: file_line(paths),
             status: summary.to_string(),
-            brief: "받았습니다".into(),
+            brief: t!("받았습니다", "Received").into(),
             buttons: vec![
-                Button::new("열기", &format!("open:{}", open.display()), true),
-                Button::new("폴더 열기", &format!("reveal:{reveal}"), false),
+                Button::new(t!("열기", "Open"), &format!("open:{}", open.display()), true),
+                Button::new(t!("폴더 열기", "Show in Folder"), &format!("reveal:{reveal}"), false),
             ],
             launch: Some(format!("reveal:{reveal}")),
             ..Card::default()
@@ -150,10 +150,10 @@ impl Cards {
             kind: Kind::Result,
             glyph: Some(Glyph::Failed),
             tint: Tint::Red,
-            title: format!("{sender}에서 받지 못했습니다"),
+            title: tf!("{sender}에서 받지 못했습니다", "Couldn't receive from {sender}"),
             detail: req.map(|r| format!("{} · {}", describe(&r.files), names(&r.files))).unwrap_or_default(),
             status: reason_text(reason),
-            brief: "받지 못했습니다".into(),
+            brief: t!("받지 못했습니다", "Not received").into(),
             ..Card::default()
         });
     }
@@ -184,8 +184,8 @@ impl Cards {
             tag: "signin".into(),
             kind: Kind::Transfer,
             glyph: Some(Glyph::Lock),
-            title: "Apple ID 로그인 중".into(),
-            brief: "로그인 중".into(),
+            title: t!("Apple ID 로그인 중", "Signing in to Apple ID").into(),
+            brief: t!("로그인 중", "Signing in").into(),
             progress: Some(rate::waiting(status)),
             ..Card::default()
         });
@@ -214,10 +214,10 @@ impl Cards {
             tag: format!("recv-{id}"),
             kind: Kind::Result,
             glyph: Some(Glyph::Link),
-            title: format!("{sender}에서 링크를 받았습니다"),
+            title: tf!("{sender}에서 링크를 받았습니다", "Link from {sender}"),
             detail: url.into(),
-            brief: "링크".into(),
-            buttons: vec![Button::new("열기", &arg, true)],
+            brief: t!("링크", "Link").into(),
+            buttons: vec![Button::new(t!("열기", "Open"), &arg, true)],
             launch: Some(arg),
             ..Card::default()
         });
@@ -245,7 +245,7 @@ fn button_row(buttons: &[(&str, &str)]) -> Vec<Button> {
 
 /// 보내기의 상태별 카드.
 fn send_card(job: u64, target: &str, files: &[PathBuf], state: &SendState, speed: Option<f64>, summary: &str) -> Card {
-    let going = format!("{target}에 보내는 중");
+    let going = tf!("{target}에 보내는 중", "Sending to {target}");
     let waiting = |brief: &str, status: &str| {
         (
             Kind::Transfer,
@@ -258,26 +258,26 @@ fn send_card(job: u64, target: &str, files: &[PathBuf], state: &SendState, speed
         )
     };
     let (kind, glyph, tint, title, brief, status, progress) = match state {
-        SendState::Queued => waiting("준비 중", "USB 어댑터를 준비하는 중…"),
-        SendState::Waiting => waiting("기기를 찾는 중", "기기를 찾는 중…"),
-        SendState::Packing => waiting("준비 중", "보낼 파일을 준비하는 중…"),
-        SendState::Asking => waiting("수락 대기 중", "수락을 기다리는 중…"),
-        SendState::Accepted => waiting("보내는 중", "보내는 중…"),
+        SendState::Queued => waiting(t!("준비 중", "Preparing"), t!("USB 어댑터를 준비하는 중…", "Preparing the USB adapter…")),
+        SendState::Waiting => waiting(t!("기기를 찾는 중", "Looking"), t!("기기를 찾는 중…", "Looking for the device…")),
+        SendState::Packing => waiting(t!("준비 중", "Preparing"), t!("보낼 파일을 준비하는 중…", "Preparing the files…")),
+        SendState::Asking => waiting(t!("수락 대기 중", "Waiting"), t!("수락을 기다리는 중…", "Waiting for acceptance…")),
+        SendState::Accepted => waiting(t!("보내는 중", "Sending"), t!("보내는 중…", "Sending…")),
         SendState::Progress { sent, total } => (
             Kind::Transfer,
             Glyph::Send,
             Tint::Blue,
             going.clone(),
-            "보내는 중".into(),
+            t!("보내는 중", "Sending").into(),
             String::new(),
-            Some(rate::bar(*sent, *total, speed, "보내는 중…")),
+            Some(rate::bar(*sent, *total, speed, t!("보내는 중…", "Sending…"))),
         ),
         SendState::Delivered => (
             Kind::Result,
             Glyph::Done,
             Tint::Green,
-            format!("{target}에 보냈습니다"),
-            "보냈습니다".into(),
+            tf!("{target}에 보냈습니다", "Sent to {target}"),
+            t!("보냈습니다", "Sent").into(),
             summary.to_string(),
             None,
         ),
@@ -285,8 +285,8 @@ fn send_card(job: u64, target: &str, files: &[PathBuf], state: &SendState, speed
             Kind::Result,
             Glyph::Failed,
             Tint::Orange,
-            format!("{target}에서 거절했습니다"),
-            "거절됨".into(),
+            tf!("{target}에서 거절했습니다", "{target} declined"),
+            t!("거절됨", "Declined").into(),
             String::new(),
             None,
         ),
@@ -294,8 +294,8 @@ fn send_card(job: u64, target: &str, files: &[PathBuf], state: &SendState, speed
             Kind::Result,
             Glyph::Failed,
             Tint::Red,
-            format!("{target}에 보내지 못했습니다"),
-            "보내지 못했습니다".into(),
+            tf!("{target}에 보내지 못했습니다", "Couldn't send to {target}"),
+            t!("보내지 못했습니다", "Not sent").into(),
             reason_text(reason),
             None,
         ),

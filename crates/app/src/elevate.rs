@@ -67,7 +67,12 @@ pub fn start_engine() -> io::Result<()> {
     if !setup.is_empty() {
         match run_elevated(&format!("--setup {}", setup.join(" ")), true)? {
             0 => {}
-            code => return Err(io::Error::other(format!("서비스 설치가 {code} 코드로 끝났습니다 (setup.log)"))),
+            code => {
+                return Err(io::Error::other(tf!(
+                    "서비스 설치가 {code} 코드로 끝났습니다 (setup.log)",
+                    "Service setup ended with code {code} (setup.log)"
+                )));
+            }
         }
     }
     crate::service::start(crate::ipc::current_session()).or_else(|e| {

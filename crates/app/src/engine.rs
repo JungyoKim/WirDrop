@@ -196,7 +196,7 @@ struct Receivers {
 /// 실행에도 씁니다.
 async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<(Vec<u16>, FirewallRules)>) -> io::Result<End> {
     tracing::info!("starting the link: {cfg:?}");
-    status(pipe, Phase::Starting, "USB 어댑터를 켜는 중…").await?;
+    status(pipe, Phase::Starting, "turning on the USB adapter").await?;
     let usbfwd = crate::paths::beside("usbfwd.exe");
     let stale = crate::win::kill_running(&usbfwd);
     if stale > 0 {
@@ -435,7 +435,7 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
                 let (expired, waiting): (Vec<Pending>, Vec<Pending>) = pending.drain(..).partition(|p| p.deadline <= now);
                 pending = waiting;
                 for p in expired {
-                    let reason = "기기를 찾지 못했습니다. 화면을 켜고 AirDrop 수신을 확인해 주세요.".to_string();
+                    let reason = crate::ipc::NOT_FOUND.to_string();
                     pipe.send(&Msg::SendUpdate { job: p.job, state: SendState::Failed { reason } }).await?;
                 }
                 if let Some(d) = &mut discovery

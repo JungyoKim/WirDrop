@@ -12,6 +12,9 @@
 //! - --settings: 트레이 앱의 메뉴를 엽니다 (필요하면 앱을 시작).
 //! - --setup ...: 관리자 권한이 필요한 설치 작업 (서비스, 드라이버, 탐색기 메뉴).
 //! - --exit: 도는 트레이 앱을 끝냅니다.
+#[macro_use]
+mod lang;
+
 mod driver;
 mod elevate;
 mod engine;

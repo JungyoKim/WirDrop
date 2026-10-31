@@ -836,14 +836,14 @@ fn button_name(face: &Face, card: &Card, rect: &Rect, args: &str) -> String {
     });
     match label {
         Some(label) => label,
-        None if args == layout::CLOSE => "닫기".into(),
+        None if args == layout::CLOSE => crate::t("닫기", "Close").into(),
         None if args == layout::SUBMIT => card
             .field
             .as_ref()
             .map(|f| f.action.clone())
             .filter(|a| !a.is_empty())
-            .unwrap_or_else(|| "확인".into()),
-        None if card.cancel.as_deref() == Some(args) => "중지".into(),
+            .unwrap_or_else(|| crate::t("확인", "OK").into()),
+        None if card.cancel.as_deref() == Some(args) => crate::t("중지", "Stop").into(),
         None => card.title.clone(),
     }
 }

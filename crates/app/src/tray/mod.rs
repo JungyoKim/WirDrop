@@ -463,7 +463,11 @@ fn rename(view: &TrayView) {
     };
     let name = view.snapshot.as_ref().map(|s| s.settings.device_name.clone()).unwrap_or_default();
     let (x, y) = cursor();
-    menu.ask_text(x, y, "AirDrop 이름 설정", &name, "Enter: 저장 · Esc: 취소", move |typed| {
+    let (title, hint) = (
+        t!("AirDrop 이름 설정", "AirDrop name"),
+        t!("Enter: 저장 · Esc: 취소", "Enter: Save · Esc: Cancel"),
+    );
+    menu.ask_text(x, y, title, &name, hint, move |typed| {
         let typed = typed.trim().to_string();
         if !typed.is_empty() {
             let _ = events.send(HubEvent::Menu(MenuCmd::Change(Change::DeviceName(typed))));
@@ -631,17 +635,21 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) {
         // Fluent 메뉴처럼: 사용자가 필요할 때 엔진을 시작하는 상태 줄.
         item(if view.startable { MF_STRING } else { MF_STRING | MF_GRAYED }, ID_RECONNECT, &view.status);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        item(MF_STRING, ID_OPEN_DIR, "폴더");
+        item(MF_STRING, ID_OPEN_DIR, t!("폴더", "Folder"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        item(MF_STRING | if view.receive { MF_CHECKED } else { MF_STRING }, ID_RECEIVE, "받기");
+        item(
+            MF_STRING | if view.receive { MF_CHECKED } else { MF_STRING },
+            ID_RECEIVE,
+            t!("받기", "Receive"),
+        );
         item(
             MF_STRING | if view.autostart { MF_CHECKED } else { MF_STRING },
             ID_AUTOSTART,
-            "부팅 시 켜기",
+            t!("부팅 시 켜기", "Open at boot"),
         );
         let _ = SetMenuDefaultItem(menu, ID_OPEN_DIR as u32, 0);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        item(MF_STRING, ID_EXIT, "종료");
+        item(MF_STRING, ID_EXIT, t!("종료", "Quit"));
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0, x, y, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));

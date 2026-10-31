@@ -2,10 +2,19 @@
 use super::*;
 
 impl Hub {
+    fn nothing_to_send(&self) {
+        self.notify(
+            "send",
+            t!("보낼 파일이 없습니다", "Nothing to send"),
+            t!("보낼 수 있는 파일이나 폴더가 없습니다.", "There are no files or folders to send."),
+            &[],
+        );
+    }
+
     pub(super) fn new_job(&mut self, target: TargetRef, files: Vec<PathBuf>) {
         let files: Vec<PathBuf> = files.into_iter().filter(|f| f.is_file() || f.is_dir()).collect();
         if files.is_empty() {
-            self.notify("send", "보낼 파일이 없습니다", "보낼 수 있는 파일이나 폴더가 없습니다.", &[]);
+            self.nothing_to_send();
             return;
         }
         let job = self.next_job;
@@ -85,8 +94,11 @@ impl Hub {
             c.send_state(job, &j.target.name, &j.files, &state, speed, &summary);
         }
         let ended = match &state {
-            SendState::Failed { reason } => Some((format!("{}에 보내지 못했습니다", j.target.name), text::reason_text(reason))),
-            SendState::Declined => Some((format!("{}에서 거절했습니다", j.target.name), String::new())),
+            SendState::Failed { reason } => Some((
+                tf!("{}에 보내지 못했습니다", "Couldn't send to {}", j.target.name),
+                text::reason_text(reason),
+            )),
+            SendState::Declined => Some((tf!("{}에서 거절했습니다", "{} declined", j.target.name), String::new())),
             _ => None,
         };
         j.state = state;
@@ -147,7 +159,7 @@ impl Hub {
         }
         let files: Vec<PathBuf> = files.into_iter().filter(|f| f.is_file() || f.is_dir()).collect();
         if files.is_empty() {
-            self.notify("send", "보낼 파일이 없습니다", "보낼 수 있는 파일이나 폴더가 없습니다.", &[]);
+            self.nothing_to_send();
             return;
         }
         self.wake();
@@ -160,7 +172,12 @@ impl Hub {
         self.wake();
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let files = crate::win::pick_in(0, "AirDrop으로 보낼 파일", crate::win::Pick::Files, folder.as_deref());
+            let files = crate::win::pick_in(
+                0,
+                t!("AirDrop으로 보낼 파일", "Files to send with AirDrop"),
+                crate::win::Pick::Files,
+                folder.as_deref(),
+            );
             if !files.is_empty() {
                 let _ = events.send(HubEvent::Menu(MenuCmd::SendHere(files)));
             }

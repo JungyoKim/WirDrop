@@ -1,7 +1,129 @@
-//! 트레이 아이콘처럼 오른쪽 아래 근처에 견본 메뉴를 열고 고른 것을 찍습니다.
+//! 트레이 앱의 메뉴를 견본 상태로 열고 고른 것을 찍습니다: cargo run -p wirdrop-menu --example demo [x y]
+//!
+//! MENU_SHARE=1이면 탐색기에서 보낼 때 뜨는 기기 메뉴를, MENU_RENAME=1이면 이름 입력칸을 엽니다.
+//! WIRDROP_LANG=ko|en으로 문구의 언어를 정하고, MENU_IGPU=1이면 트레이 앱처럼 절전 GPU를 씁니다.
+//! 문구와 아이콘은 WirDrop(app/src/tray/menu.rs)의 것과 같고, 이름과 경로는 견본입니다.
 use std::time::Duration;
 
 use wirdrop_menu::{Entry, Menu};
+
+// Segoe Fluent Icons.
+const READY: char = '\u{E701}';
+const SEND: char = '\u{E724}';
+const PHONE: char = '\u{E8EA}';
+const TABLET: char = '\u{E70A}';
+const SEARCH: char = '\u{E721}';
+const FOLDER: char = '\u{E838}';
+const PEOPLE: char = '\u{E716}';
+const PERSON: char = '\u{E77B}';
+const PC: char = '\u{E977}';
+const RENAME: char = '\u{E8AC}';
+const DELETE: char = '\u{E74D}';
+const ACCOUNT: char = '\u{E910}';
+const ADD: char = '\u{E710}';
+const SIGN_OUT: char = '\u{F3B1}';
+const BELL: char = '\u{EA8F}';
+const POWER: char = '\u{E7E8}';
+const RECEIVE: char = '\u{E896}';
+const SAVE: char = '\u{E74E}';
+
+/// 지금 언어의 문구 (한국어, 영어 순).
+fn t(ko: &'static str, en: &'static str) -> &'static str {
+    if english() { en } else { ko }
+}
+
+/// WIRDROP_LANG이 ko로 시작하지 않으면 영어 (견본이라 Windows 언어는 보지 않습니다).
+fn english() -> bool {
+    !std::env::var("WIRDROP_LANG").unwrap_or_default().to_ascii_lowercase().starts_with("ko")
+}
+
+/// 트레이 아이콘의 메뉴: 받기, 폴더와 저장 위치, 이 PC가 보이는 방식, Apple ID, 알림 위치, 부팅 시 켜기.
+fn tray() -> Vec<Entry> {
+    let rule = |key: &str, text: &str, on: bool| Entry::radio(format!("rule:0:{key}"), text, on);
+    let person = vec![
+        rule("default", t("매번 묻기", "Always ask"), false),
+        rule("accept", t("항상 수락", "Always accept"), true),
+        rule("block", t("차단", "Block"), false),
+        Entry::separator(),
+        Entry::item("forget:0", t("목록에서 지우기", "Remove from list")).glyph(DELETE),
+    ];
+    let receive = vec![
+        Entry::radio("receive:off", t("끔", "Off"), false),
+        Entry::radio("receive:contacts", t("연락처만", "Contacts only"), false),
+        Entry::radio("receive:everyone", t("모든 사람", "Everyone"), true),
+        Entry::separator(),
+        Entry::sub(
+            t("기억한 기기", "Known devices"),
+            vec![Entry::sub(t("홍길동의 iPhone · iPhone 16 Pro", "John's iPhone · iPhone 16 Pro"), person).glyph(PERSON)],
+        )
+        .glyph(PEOPLE),
+    ];
+    let models = ["iMac", "MacBook Pro", "MacBook Air", "Mac mini", "Mac Studio", "Mac Pro"]
+        .into_iter()
+        .map(|m| Entry::radio(format!("model:{m}"), m, m == "MacBook Pro"))
+        .collect();
+    let apple_id = vec![
+        Entry::sub(
+            "user@example.com",
+            vec![
+                Entry::item("signin:0", t("다시 로그인…", "Sign in again…")).glyph(ACCOUNT),
+                Entry::item("signout:0", t("로그아웃…", "Sign out…")).glyph(SIGN_OUT),
+            ],
+        )
+        .glyph(PERSON),
+        Entry::separator(),
+        Entry::item("signin:new", t("다른 Apple ID 추가…", "Add another Apple ID…")).glyph(ADD),
+    ];
+    let spots = [
+        t("왼쪽 위", "Top left"),
+        t("위", "Top"),
+        t("오른쪽 위", "Top right"),
+        t("왼쪽", "Left"),
+        t("가운데", "Center"),
+        t("오른쪽", "Right"),
+        t("왼쪽 아래", "Bottom left"),
+        t("아래", "Bottom"),
+        t("오른쪽 아래", "Bottom right"),
+    ];
+    let mut island = Vec::new();
+    for (i, spot) in spots.into_iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            island.push(Entry::separator());
+        }
+        island.push(Entry::radio(format!("island-at:{i}"), spot, i == 1));
+    }
+    // 한국어 Windows의 WinUI는 역슬래시를 "₩"로 그립니다. 영어 견본은 영어 Windows에서처럼 보이도록 비슷한
+    // 글자(⧵)로 씁니다.
+    let downloads = t(r"C:\Users\me\Downloads", "C:⧵Users⧵me⧵Downloads");
+    vec![
+        Entry::label(t("준비됨 · MY-PC", "Ready · MY-PC")).glyph(READY).handle(),
+        Entry::separator(),
+        Entry::sub(t("받기", "Receive"), receive).glyph(RECEIVE),
+        Entry::item("open-dir", t("폴더", "Folder")).glyph(FOLDER),
+        Entry::item("save-dir", downloads).glyph(SAVE),
+        Entry::separator(),
+        Entry::item("rename", "MY-PC").glyph(RENAME),
+        Entry::sub("MacBook Pro", models).glyph(PC),
+        Entry::sub("Apple ID", apple_id).glyph(ACCOUNT),
+        Entry::separator(),
+        Entry::sub(t("알림 위치", "Notification position"), island).glyph(BELL),
+        Entry::toggle("autostart", t("부팅 시 켜기", "Open at boot"), true),
+        Entry::separator(),
+        Entry::item("exit", t("종료", "Quit")).glyph(POWER),
+    ]
+}
+
+/// 탐색기에서 보낼 때의 기기 메뉴: 찾는 중, 그리고 찾은 기기들.
+fn share(found: bool) -> Vec<Entry> {
+    let mut items = vec![Entry::label("IMG_4021.HEIC").glyph(SEND).handle(), Entry::separator()];
+    if found {
+        items.push(Entry::item("share:0", t("홍길동의 iPhone", "John's iPhone")).glyph(PHONE));
+        items.push(Entry::item("share:1", t("홍길동의 iPad", "John's iPad")).glyph(TABLET));
+    } else {
+        items.push(Entry::label(t("주변 기기를 찾는 중…", "Looking for nearby devices…")).glyph(SEARCH));
+    }
+    items
+}
 
 fn main() {
     // MENU_IGPU=1: 트레이 앱처럼 시작할 때 이 프로그램에 절전 GPU를 정합니다.
@@ -26,76 +148,37 @@ fn main() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
     };
-    let people = vec![
-        Entry::radio("rule:0:default", "묻기", true),
-        Entry::radio("rule:0:accept", "항상 수락", false),
-        Entry::radio("rule:0:block", "차단", false),
-        Entry::separator(),
-        Entry::item("forget:0", "목록에서 지우기").glyph('\u{E74D}'),
-    ];
-    let entries = vec![
-        Entry::label("준비됨 · MY-PC").glyph('\u{E701}').handle(),
-        Entry::separator(),
-        // 제목 (아이콘 없는 레이블)은 아이콘이 시작하는 곳에서 시작합니다.
-        Entry::label("로그인되어 있지 않습니다"),
-        Entry::item("signin", "Apple ID로 로그인…").glyph('\u{E710}'),
-        Entry::separator(),
-        Entry::sub(
-            "파일 보내기",
-            vec![
-                Entry::item("send:0", "iPhone").glyph('\u{E8EA}'),
-                Entry::item("send:1", "iPad").glyph('\u{E70A}'),
-            ],
-        )
-        .glyph('\u{E724}'),
-        Entry::item("open-dir", "받은 파일 폴더 열기").glyph('\u{E838}'),
-        Entry::separator(),
-        Entry::toggle("receive", "AirDrop 받기", true).glyph('\u{E896}'),
-        Entry::sub(
-            "받기 허용",
-            vec![
-                Entry::radio("unknown:ask", "처음 보는 기기는 묻기", true),
-                Entry::radio("unknown:decline", "처음 보는 기기는 거절", false),
-                Entry::separator(),
-                Entry::sub("iPhone (iPhone 16 Pro)", people).glyph('\u{E77B}'),
-            ],
-        )
-        .glyph('\u{E8D7}'),
-        Entry::separator(),
-        Entry::toggle("autostart", "Windows 시작 시 실행", true).glyph('\u{E7E8}'),
-        Entry::item("exit", "끝내기").glyph('\u{E711}'),
-    ];
     // demo [x y]: 열 자리(물리 픽셀).
     let at: Vec<i32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
     let (x, y) = match at[..] {
         [x, y] => (x, y),
         _ => (w - 160, h - 24),
     };
-    // 트레이 앱에서처럼: 첫 메뉴가 옮길 때 아일랜드는 이미 오래전에 떠 있습니다.
+    // 트레이 앱에서처럼: 첫 메뉴가 열릴 때 아일랜드는 이미 오래전에 떠 있습니다.
     std::thread::sleep(Duration::from_millis(1500));
-    // MENU_SHARE=1: 점을 가운데로 열고 기기가 오가는 탐색기의 기기 메뉴. (알려진 문제: 다른 GPU가
-    // 맡은 화면에서는 바뀐 줄이 뒤섞여 나옵니다.)
     if std::env::var("MENU_SHARE").is_ok() {
-        let searching = vec![
-            Entry::label("KakaoTalk_20260718_231908671.png").glyph('\u{E724}').handle(),
-            Entry::separator(),
-            Entry::label("주변 기기를 찾는 중…").glyph('\u{E721}'),
-        ];
-        let found = vec![
-            Entry::label("KakaoTalk_20260718_231908671.png").glyph('\u{E724}').handle(),
-            Entry::separator(),
-            Entry::item("share:0", "홍길동의 iPhone").glyph('\u{E8EA}'),
-            Entry::item("share:1", "iPad").glyph('\u{E70A}'),
-        ];
-        menu.show_centred(x, y, searching.clone(), 7);
-        for entries in [found, searching] {
+        // 점을 가운데로 열고, 기기가 오가는 대로 바뀝니다.
+        menu.show_centred(x, y, share(false), 7);
+        for found in [true, false] {
             std::thread::sleep(Duration::from_millis(2500));
-            menu.update(7, entries);
+            menu.update(7, share(found));
         }
         std::thread::sleep(Duration::from_millis(3000));
         return;
     }
-    menu.show(x, y, entries);
+    if std::env::var("MENU_RENAME").is_ok() {
+        let hint = t("Enter: 저장 · Esc: 취소", "Enter: Save · Esc: Cancel");
+        let (done, typed) = std::sync::mpsc::channel();
+        menu.ask_text(x, y, t("AirDrop 이름 설정", "AirDrop name"), "MY-PC", hint, move |name| {
+            let _ = done.send(name);
+        });
+        match typed.recv_timeout(Duration::from_secs(25)) {
+            Ok(name) => println!("typed {name}"),
+            Err(_) => println!("nothing typed"),
+        }
+        return;
+    }
+    menu.show(x, y, tray());
     match rx.recv_timeout(Duration::from_secs(25)) {
         Ok(key) => println!("picked {key}"),
         Err(_) => println!("nothing picked"),

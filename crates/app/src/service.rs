@@ -228,7 +228,10 @@ pub fn install() -> io::Result<()> {
         }
         Err(_) => manager.create_service(&info, access).map_err(io::Error::other)?,
     };
-    let _ = service.set_description("WirDrop의 AirDrop 엔진: USB 무선 어댑터와 가상 네트워크(awdl0)를 다룹니다");
+    let _ = service.set_description(t!(
+        "WirDrop의 AirDrop 엔진: USB 무선 어댑터와 가상 네트워크(awdl0)를 다룹니다",
+        "WirDrop's AirDrop engine: runs the USB Wi-Fi adapter and the awdl0 virtual network"
+    ));
     let out = crate::win::hidden("sc.exe").args(["sdset", NAME, SDDL]).output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!("sc sdset: {}", String::from_utf8_lossy(&out.stdout).trim())));

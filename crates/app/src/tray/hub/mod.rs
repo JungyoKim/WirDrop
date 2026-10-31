@@ -149,7 +149,6 @@ pub struct Hub {
     clients: HashMap<u64, Client>,
     engine: Option<u64>,
     phase: Phase,
-    detail: String,
     peers: usize,
     adapter: Option<String>,
     devices_dirty: Option<Instant>,
@@ -157,7 +156,7 @@ pub struct Hub {
     asks: HashMap<u64, Ask>,
     /// 최근 요청에서 받은 것들. 카드 버튼에 씁니다.
     received_files: BTreeMap<u64, Vec<PathBuf>>,
-    /// Requests whose "열기" was clicked before the files were in.
+    /// 파일이 다 들어오기 전에 "열기"를 누른 요청.
     open_when_done: HashSet<u64>,
     jobs: BTreeMap<u64, Job>,
     next_job: u64,
@@ -201,7 +200,6 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
         clients: HashMap::new(),
         engine: None,
         phase: Phase::Stopped,
-        detail: String::new(),
         peers: 0,
         adapter: crate::win::find_adapter(),
         devices_dirty: None,
@@ -240,8 +238,11 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
     if greet && hub.adapter.is_none() {
         hub.notify(
             "adapter",
-            "USB 어댑터를 꽂아 주세요",
-            "TP-Link Archer T3U Nano를 꽂으면 바로 시작합니다.",
+            t!("USB 어댑터를 꽂아 주세요", "Plug in the USB adapter"),
+            t!(
+                "TP-Link Archer T3U Nano를 꽂으면 바로 시작합니다.",
+                "WirDrop starts as soon as a TP-Link Archer T3U Nano is in."
+            ),
             &[],
         );
     }
@@ -369,16 +370,18 @@ impl Hub {
                 self.phase = Phase::NeedsSetup;
                 self.notify(
                     "engine",
-                    "관리자 권한이 필요합니다",
-                    "AirDrop 엔진을 설치하거나 업데이트하려면 허용해 주세요.",
-                    &[("다시 시도", "start")],
+                    t!("관리자 권한이 필요합니다", "Administrator permission needed"),
+                    t!(
+                        "AirDrop 엔진을 설치하거나 업데이트하려면 허용해 주세요.",
+                        "Allow it to install or update the AirDrop engine."
+                    ),
+                    &[(t!("다시 시도", "Try Again"), "start")],
                 );
                 self.push();
             }
             HubEvent::Launched(Err(e)) => {
                 tracing::warn!("engine launch failed: {e}");
                 self.phase = Phase::Failed;
-                self.detail = e.to_string();
                 self.launched = None;
                 self.failed_at = Some(Instant::now());
                 self.push();
@@ -472,7 +475,6 @@ impl Hub {
                     self.received_files.clear();
                     self.open_when_done.clear();
                     self.phase = Phase::Starting;
-                    self.detail.clear();
                     self.send_to(id, Msg::Config { cfg: self.engine_config() });
                     self.push();
                 }
@@ -489,7 +491,6 @@ impl Hub {
                     self.targets.clear();
                 }
                 self.phase = phase;
-                self.detail = detail;
                 self.push();
             }
             Msg::Peers { count } if from_engine => {
@@ -530,7 +531,7 @@ impl Hub {
                 self.notice(
                     &format!("recv-{rid}-end"),
                     menu::WARNING_GLYPH,
-                    &format!("{sender}에서 받지 못했습니다"),
+                    &tf!("{sender}에서 받지 못했습니다", "Couldn't receive from {sender}"),
                     &why,
                     &[],
                 );
@@ -636,9 +637,12 @@ impl Hub {
                 let yes = format!("signout:{}", root.display());
                 self.notify(
                     "signout",
-                    &format!("{label}에서 로그아웃할까요?"),
-                    "이 PC의 AirDrop 인증서와 로그인 정보를 지웁니다.",
-                    &[("로그아웃", &yes), ("취소", "dismiss")],
+                    &tf!("{label}에서 로그아웃할까요?", "Sign out of {label}?"),
+                    t!(
+                        "이 PC의 AirDrop 인증서와 로그인 정보를 지웁니다.",
+                        "This removes the AirDrop certificate and sign-in from this PC."
+                    ),
+                    &[(t!("로그아웃", "Sign Out"), &yes), (t!("취소", "Cancel"), "dismiss")],
                 );
             }
             MenuCmd::OpenSaveDir => crate::win::open(&self.settings.save_dir.display().to_string()),
@@ -751,16 +755,20 @@ impl Hub {
     fn push(&mut self) {
         let phase = self.display_phase();
         let status = match phase {
-            Phase::Ready => format!("준비됨 · {}", self.settings.device_name),
-            Phase::Starting | Phase::Launching => "USB 어댑터 연결 중…".to_string(),
-            Phase::NoAdapter => "USB 어댑터 없음".to_string(),
-            Phase::NeedsSetup => "관리자 권한이 필요합니다 · 눌러서 다시 시도".to_string(),
-            Phase::Failed => "USB 어댑터 다시 연결하는 중…".to_string(),
-            Phase::Stopped => "꺼져 있음".to_string(),
+            Phase::Ready => tf!("준비됨 · {}", "Ready · {}", self.settings.device_name),
+            Phase::Starting | Phase::Launching => t!("USB 어댑터 연결 중…", "Connecting the USB adapter…").to_string(),
+            Phase::NoAdapter => t!("USB 어댑터 없음", "No USB adapter").to_string(),
+            Phase::NeedsSetup => t!(
+                "관리자 권한이 필요합니다 · 눌러서 다시 시도",
+                "Administrator permission needed · Click to retry"
+            )
+            .to_string(),
+            Phase::Failed => t!("USB 어댑터 다시 연결하는 중…", "Reconnecting the USB adapter…").to_string(),
+            Phase::Stopped => t!("꺼져 있음", "Off").to_string(),
         };
         let sending = self.jobs.values().filter(|j| !j.state.is_final()).count();
         let tooltip = if sending > 0 {
-            format!("WirDrop – 보내는 중 ({sending})")
+            tf!("WirDrop – 보내는 중 ({sending})", "WirDrop – Sending ({sending})")
         } else {
             format!("WirDrop – {}", short(&status, 100))
         };

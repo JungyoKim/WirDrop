@@ -21,7 +21,6 @@ impl Hub {
         tracing::info!("starting the engine");
         self.launched = Some(Instant::now());
         self.phase = Phase::Launching;
-        self.detail.clear();
         let events = self.events.clone();
         tokio::task::spawn_blocking(move || {
             let _ = events.send(HubEvent::Launched(elevate::start_engine()));
@@ -39,8 +38,13 @@ impl Hub {
         tokio::task::spawn_blocking(move || {
             let result = match elevate::run_elevated("--setup --menu on", true) {
                 Ok(0) => Ok(()),
-                Ok(code) => Err(format!("설정 오류 ({code}). logs\\setup.log를 확인해 주세요.")),
-                Err(e) if e.raw_os_error() == Some(elevate::ERROR_CANCELLED) => Err("관리자 권한을 받지 못했습니다.".into()),
+                Ok(code) => Err(tf!(
+                    "설정 오류 ({code}). logs\\setup.log를 확인해 주세요.",
+                    "Setup error ({code}). See logs\\setup.log."
+                )),
+                Err(e) if e.raw_os_error() == Some(elevate::ERROR_CANCELLED) => {
+                    Err(t!("관리자 권한을 받지 못했습니다.", "Administrator permission wasn't given.").into())
+                }
                 Err(e) => Err(e.to_string()),
             };
             let _ = events.send(HubEvent::MenuDone(result));
@@ -53,7 +57,7 @@ impl Hub {
             Ok(()) => tracing::info!("Explorer menu registered"),
             Err(e) => {
                 tracing::warn!("Explorer menu: {e}");
-                self.notify("menu", "탐색기 메뉴를 켜지 못했습니다", &e, &[]);
+                self.notify("menu", t!("탐색기 메뉴를 켜지 못했습니다", "Couldn't turn on the Explorer menu"), &e, &[]);
             }
         }
         self.push();
@@ -72,7 +76,7 @@ impl Hub {
         for (job, j) in self.jobs.iter_mut() {
             if !j.state.is_final() && j.state != SendState::Queued {
                 j.state = SendState::Failed {
-                    reason: "엔진이 멈췄습니다.".into(),
+                    reason: text::ENGINE_STOPPED.into(),
                 };
                 if let Some(c) = &self.cards {
                     c.send_state(*job, &j.target.name, &j.files, &j.state, None, "");
@@ -80,9 +84,6 @@ impl Hub {
             }
         }
         self.phase = if self.adapter.is_some() { Phase::Failed } else { Phase::NoAdapter };
-        if self.detail.is_empty() {
-            self.detail = "엔진이 멈췄습니다".into();
-        }
         self.failed_at = Some(Instant::now());
         // 어댑터가 꽂혀 있는 동안 on_tick이 다시 띄웁니다.
         self.push();
@@ -120,7 +121,7 @@ impl Hub {
         self.check_devices();
         if self.phase == Phase::Launching && self.launched.is_some_and(|t| t.elapsed() > LAUNCH_FOR) {
             self.phase = Phase::Failed;
-            self.detail = "엔진이 시작되지 않았습니다".into();
+            tracing::warn!("the engine didn't start in time");
             self.push();
         }
         // 어댑터가 꽂혀 있는 동안 WirDrop은 연결을 유지합니다: 실패한 링크는 다시 해 보고, 사라진

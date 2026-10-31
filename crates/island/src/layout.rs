@@ -340,7 +340,11 @@ fn input(card: &Card, field: &Field, typing: Option<&Typing>, m: &dyn Measure) -
     close_button(&mut items, close);
 
     let row = M + 44.0 + 14.0;
-    let label = if field.action.is_empty() { "확인" } else { field.action.as_str() };
+    let label = if field.action.is_empty() {
+        crate::t("확인", "OK")
+    } else {
+        field.action.as_str()
+    };
     let bw = (m.width(label, Style::Button) + 40.0).max(76.0);
     let send = Rect::new(w - M - bw, row, bw, 44.0);
     let rect = Rect::new(M, row, send.x - 8.0 - M, 44.0);
@@ -491,10 +495,10 @@ fn open(card: &Card, m: &dyn Measure) -> Face {
     let mut y = top + row_h;
     if !card.buttons.is_empty() {
         y += 14.0;
-        let n = card.buttons.len() as f32;
-        let bw = (w - 2.0 * M - 8.0 * (n - 1.0)) / n;
-        for (i, b) in card.buttons.iter().enumerate() {
-            let rect = Rect::new(M + i as f32 * (bw + 8.0), y, bw, 44.0);
+        let mut x = M;
+        for (b, bw) in card.buttons.iter().zip(button_widths(m, &card.buttons, w - 2.0 * M)) {
+            let rect = Rect::new(x, y, bw, 44.0);
+            x += bw + 8.0;
             // Apple처럼 동작 버튼은 파란색입니다.
             items.push(Item::Capsule {
                 rect,
@@ -523,6 +527,22 @@ fn open(card: &Card, m: &dyn Measure) -> Face {
         field_text: None,
         field_scroll: 0.0,
     }
+}
+
+/// 버튼 줄의 너비들 (사이 8, 모두 합쳐 row). 글자가 모두 들어가면 같은 너비로, 하나라도 넘치면
+/// 글자 길이에 맞추고 남는 자리는 똑같이 나눕니다 (영어의 "Always Accept" 같은 것).
+fn button_widths(m: &dyn Measure, buttons: &[crate::Button], row: f32) -> Vec<f32> {
+    let n = buttons.len() as f32;
+    let room = row - 8.0 * (n - 1.0);
+    let need: Vec<f32> = buttons.iter().map(|b| m.width(&b.label, Style::Button) + 32.0).collect();
+    if need.iter().all(|w| *w <= room / n) {
+        return vec![room / n; buttons.len()];
+    }
+    let total: f32 = need.iter().sum();
+    if total >= room {
+        return need.iter().map(|w| w * room / total).collect();
+    }
+    need.iter().map(|w| w + (room - total) / n).collect()
 }
 
 fn small(card: &Card, m: &dyn Measure) -> Face {
