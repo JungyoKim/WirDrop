@@ -1,15 +1,24 @@
 # Builds a release when a version tag (v1.2.3) is pushed: the setup program for new installs, the
-# zip of WirDrop's files and its signed update.json for updates (app/src/update.rs), and the winget
-# manifests for that setup program (app/package/winget, filled in), ready to submit to
+# zip of WirDrop's files and its signed update.json for updates (crates/app/src/update.rs), and the
+# winget manifests for that setup program (packaging/winget, filled in), ready to submit to
 # microsoft/winget-pkgs.
 #
+# Run it by hand (Actions > Release > Run workflow) to build everything without publishing: the
+# files are kept as the run's artifact instead.
+#
 # Needs the repository secret WIRDROP_UPDATE_KEY: the release key, as update_sign keygen wrote
-# it (app/examples/update_sign.rs). It never leaves this job.
+# it (crates/app/examples/update_sign.rs). It never leaves this job.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build (nothing is published)
+        required: true
+        default: "0.0.0"
 
 permissions:
   contents: write
@@ -26,8 +35,8 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $v = '${{ github.ref_name }}'.TrimStart('v')
-          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "the tag ${{ github.ref_name }} isn't v<major>.<minor>.<patch>" }
+          $v = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}'.TrimStart('v') }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "$v isn't <major>.<minor>.<patch>" }
           "version=$v" >> $env:GITHUB_OUTPUT
           # WirDrop.exe reports this version, and updates compare by it.
           $toml = Get-Content crates/app/Cargo.toml -Raw
@@ -96,10 +105,21 @@ jobs:
           Compress-Archive winget/* "WirDrop-$v-winget.zip"
 
       - name: Release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = '${{ steps.version.outputs.version }}'
           gh release create "v$v" "WirDrop-Setup-$v.exe" "WirDrop-$v.zip" update.json "WirDrop-$v-winget.zip" --title "WirDrop $v" --generate-notes
+
+      - name: Keep the files (trial run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: WirDrop-${{ steps.version.outputs.version }}
+          path: |
+            WirDrop-Setup-*.exe
+            WirDrop-*.zip
+            update.json
 
