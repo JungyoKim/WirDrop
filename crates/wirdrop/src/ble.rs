@@ -24,15 +24,19 @@ impl BleWake {
         Self::start_for(&[Account::global()])
     }
 
-    /// 계정마다 그 해시로 광고를 시작합니다 (신원이 없는 계정이나 계정이 없으면 해시 0). 첫 광고를
-    /// 못 시작할 때만 실패합니다. 여럿은 Windows가 번갈아 보냅니다.
+    /// 계정마다 그 해시로 광고를 시작합니다 (신원이 없는 계정은 해시 0). 계정이 하나도 없어도 (Apple
+    /// ID에 로그인하지 않은 PC) 해시 0으로 하나는 광고합니다: "모든 사람" 모드의 폰은 그것에 깹니다.
+    /// 첫 광고를 못 시작할 때만 실패합니다. 여럿은 Windows가 번갈아 보냅니다.
     pub fn start_for(accounts: &[Account]) -> io::Result<BleWake> {
         // WinRT에는 COM이 필요합니다: 어느 스레드가 시작했든 광고기를 위해 프로세스의 다중 스레드
         // 아파트를 살려 둡니다.
         static MTA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         // SAFETY: 평범한 COM 호출. 쿠키는 일부러 놓지 않습니다.
         MTA.get_or_init(|| unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }.is_ok());
-        let identities: Vec<_> = accounts.iter().map(Account::get).collect();
+        let mut identities: Vec<_> = accounts.iter().map(Account::get).collect();
+        if identities.is_empty() {
+            identities.push(None);
+        }
         let mut publishers = Vec::new();
         for identity in identities {
             let payload = Advert::of(crate::identity::random::<3>()?, identity.as_deref()).manufacturer_data();
@@ -104,5 +108,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let status = wake.publishers[0].Status().unwrap();
         assert_eq!(status, super::BluetoothLEAdvertisementPublisherStatus::Started);
+    }
+
+    /// Apple ID가 없는 PC도 해시 0으로 광고합니다 (Bluetooth 어댑터 필요).
+    #[test]
+    #[ignore]
+    fn without_apple_id_one_advert_still_starts() {
+        let wake = std::thread::spawn(|| super::BleWake::start_for(&[])).join().unwrap().unwrap();
+        assert_eq!(wake.publishers.len(), 1);
     }
 }
