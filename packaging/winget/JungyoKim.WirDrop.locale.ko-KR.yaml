@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: JungyoKim.WirDrop
+PackageVersion: {{VERSION}}
+PackageLocale: ko-KR
+Publisher: JungyoKim
+PublisherUrl: https://github.com/JungyoKim
+PublisherSupportUrl: https://github.com/JungyoKim/WirDrop/issues
+PackageName: WirDrop
+PackageUrl: https://github.com/JungyoKim/WirDrop
+License: MIT
+LicenseUrl: https://github.com/JungyoKim/WirDrop/blob/main/LICENSE
+ShortDescription: Windows 11에서 iPhone, iPad와 AirDrop으로 파일을 주고받습니다.
+Description: |-
+  탐색기에서 파일을 우클릭해 iPhone이나 iPad로 보내고, iPhone 공유 시트에서 이 PC로 받습니다.
+  AirDrop이 쓰는 무선 링크(AWDL)를 USB 무선 랜카드로 직접 구동하므로 TP-Link Archer T3U Nano
+  (Realtek RTL8812BU) 같은 지원 어댑터가 필요합니다. 커널 드라이버를 설치하지 않습니다.
+Moniker: wirdrop
+Tags:
+- airdrop
+- iphone
+- ipad
+- file-transfer
+- awdl
+ReleaseNotesUrl: https://github.com/JungyoKim/WirDrop/releases/tag/v{{VERSION}}
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

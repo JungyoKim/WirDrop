@@ -1,0 +1,105 @@
+# Builds a release when a version tag (v1.2.3) is pushed: the setup program for new installs, the
+# zip of WirDrop's files and its signed update.json for updates (app/src/update.rs), and the winget
+# manifests for that setup program (app/package/winget, filled in), ready to submit to
+# microsoft/winget-pkgs.
+#
+# Needs the repository secret WIRDROP_UPDATE_KEY: the release key, as update_sign keygen wrote
+# it (app/examples/update_sign.rs). It never leaves this job.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: version
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "the tag ${{ github.ref_name }} isn't v<major>.<minor>.<patch>" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          # WirDrop.exe reports this version, and updates compare by it.
+          $toml = Get-Content crates/app/Cargo.toml -Raw
+          $toml -replace '(?m)^version = "[^"]*"', "version = ""$v""" | Set-Content crates/app/Cargo.toml -NoNewline
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # appleid-anisette is 32-bit: the iCloud component it loads is.
+          targets: i686-pc-windows-msvc
+
+      - name: Wintun
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun
+          $dll = 'wintun\wintun\bin\amd64\wintun.dll'
+          # The DLL WirDrop has always shipped (signed by WireGuard LLC).
+          if ((Get-FileHash $dll).Hash -ne 'E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE') {
+            throw "wintun.dll isn't the expected 0.14.1"
+          }
+
+      - name: Build
+        shell: pwsh
+        run: ./packaging/stage.ps1 -Out stage -Wintun wintun\wintun\bin\amd64\wintun.dll
+
+      - name: Update zip and update.json
+        shell: pwsh
+        env:
+          WIRDROP_UPDATE_KEY: ${{ secrets.WIRDROP_UPDATE_KEY }}
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          if (-not $env:WIRDROP_UPDATE_KEY) { throw 'the WIRDROP_UPDATE_KEY secret is missing' }
+          $zip = "WirDrop-$v.zip"
+          Push-Location stage
+          tar -a -c -f "..\$zip" .
+          Pop-Location
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$v/$zip"
+          cargo run --release -p wirdrop-app --example update_sign -- sign - $zip $v $url | Out-File -Encoding utf8NoBOM update.json
+          Get-Content update.json
+
+      - name: Setup program
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y | Out-Null }
+          & $iscc /Q "/DAppVersion=${{ steps.version.outputs.version }}" "/DStage=$PWD\stage" "/O$PWD" packaging\installer\WirDrop.iss
+          if ($LASTEXITCODE) { throw 'iscc failed' }
+
+      - name: Winget manifests
+        shell: pwsh
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          $setup = "WirDrop-Setup-$v.exe"
+          $fill = @{
+            '{{VERSION}}' = $v
+            '{{DATE}}' = (Get-Date -Format 'yyyy-MM-dd')
+            '{{URL}}' = "https://github.com/${{ github.repository }}/releases/download/v$v/$setup"
+            '{{SHA256}}' = (Get-FileHash $setup -Algorithm SHA256).Hash
+          }
+          New-Item -ItemType Directory winget | Out-Null
+          foreach ($t in Get-ChildItem packaging/winget/*.yaml) {
+            $text = Get-Content $t -Raw
+            foreach ($k in $fill.Keys) { $text = $text.Replace($k, $fill[$k]) }
+            Set-Content (Join-Path winget $t.Name) $text -NoNewline -Encoding utf8NoBOM
+          }
+          Compress-Archive winget/* "WirDrop-$v-winget.zip"
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          gh release create "v$v" "WirDrop-Setup-$v.exe" "WirDrop-$v.zip" update.json "WirDrop-$v-winget.zip" --title "WirDrop $v" --generate-notes
+

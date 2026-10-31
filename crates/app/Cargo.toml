@@ -1,0 +1,52 @@
+[package]
+name = "wirdrop-app"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "WirDrop for Windows 11: a tray app that sends and receives AirDrop files"
+repository = "https://github.com/JungyoKim/WirDrop"
+publish = false
+
+[[bin]]
+name = "WirDrop"
+path = "src/main.rs"
+
+[dependencies]
+wirdrop = { path = "../wirdrop" }
+wirdrop-menu = { path = "../menu" }
+wirdrop-island = { path = "../island" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ed25519 and SHA-256 for updates (rustls brings it already).
+ring = "0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+windows-registry = "0.6"
+windows-service = "0.8"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-resource = "3"
+

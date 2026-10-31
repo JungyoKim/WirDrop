@@ -1,0 +1,56 @@
+[package]
+name = "wirdrop-island"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "A Dynamic Island for Windows: a black pill at the top of the screen, animated by the compositor"
+repository = "https://github.com/JungyoKim/WirDrop"
+publish = false
+
+[dependencies]
+tracing = "0.1"
+windows-core = "0.62"
+windows-numerics = "0.3"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Numerics",
+    "Graphics",
+    "Graphics_DirectX",
+    "System",
+    "UI",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+

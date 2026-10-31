@@ -1,0 +1,28 @@
+[package]
+name = "wirdrop-radio"
+version = "0.1.0"
+edition = "2024"
+description = "A user-mode driver for the Realtek RTL8822BU/RTL8812BU over WinUSB, for AWDL"
+# Our code is MIT; the parts ported from Linux rtw88 are BSD-3-Clause (see NOTICE.md).
+license = "MIT AND BSD-3-Clause"
+publish = false
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Devices_Usb",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Media",
+    "Win32_Networking_WinSock",
+]
+

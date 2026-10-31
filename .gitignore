@@ -1,0 +1,13 @@
+/target
+/crates/menu/tools/bindgen/target
+Cargo.lock.bak
+*.pcapng
+*.log
+# Apple ID identities and other per-machine state never belong here.
+apple-id/
+*.pk8.der
+validation_record.cms
+# The update signing key (update_sign keygen): a GitHub Actions secret, never a file here.
+*.key
+# 이 PC에서 잰 전송 속도 기준선 (scripts/check-transfer.ps1 -SaveBaseline): PC마다 다릅니다.
+/scripts/transfer-baseline.json

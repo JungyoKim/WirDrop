@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
+# 릴리스 워크플로가 {{VERSION}} 등을 채워 릴리스에 붙입니다 (.github/workflows/release.yml).
+PackageIdentifier: JungyoKim.WirDrop
+PackageVersion: {{VERSION}}
+DefaultLocale: ko-KR
+ManifestType: version
+ManifestVersion: 1.9.0

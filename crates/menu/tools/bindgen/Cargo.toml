@@ -1,0 +1,12 @@
+[package]
+name = "wirdrop-menu-gen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# menu 크레이트의 src/bindings.rs를 다시 만듭니다. 워크스페이스 밖이라 이 폴더에서 돌립니다.
+[workspace]
+
+[dependencies]
+windows-bindgen = "0.100"
+

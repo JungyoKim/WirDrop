@@ -1,0 +1,39 @@
+# 푸시와 PR마다 Windows에서 형식, clippy, 테스트를 확인합니다.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Format
+        # 우리 크레이트만 (벤더링한 owly와 생성된 코드는 그대로 둡니다).
+        run: cargo fmt -p wirdrop -p wirdrop-app -p wirdrop-shell -p wirdrop-menu -p wirdrop-island -p wirdrop-radio -p wirdrop-appleid -p wirdrop-appleid-anisette --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: owly tests
+        shell: pwsh
+        run: |
+          foreach ($crate in 'vendor/owly-awdl', 'vendor/owly-airdrop') {
+            Push-Location $crate
+            cargo test
+            if ($LASTEXITCODE) { exit 1 }
+            Pop-Location
+          }

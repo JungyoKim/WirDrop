@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# owly의 크레이트는 자체 테스트와 린트가 있는 경로 의존성이라 워크스페이스에 넣지 않습니다.
+exclude = ["vendor/owly-awdl", "vendor/owly-airdrop"]
+
+[profile.release]
+debug = 1

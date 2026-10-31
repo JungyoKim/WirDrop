@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WirDrop.ContextMenu: a sparse package (no files of its own besides the logos) that gives
+  wirdrop_shell.dll a place in File Explorer's Windows 11 menu. stage.ps1 packs it with makeappx;
+  WirDrop.exe -setup -menu on registers it with Add-AppxPackage -ExternalLocation pointing at the
+  folder WirDrop.exe is in. It isn't signed: the OID in Publisher marks it as unsigned, which
+  Windows 11 registers with -AllowUnsigned when an administrator does it (a COM server is an
+  executable activation), so there's no certificate to trust or keep secret.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 desktop4 desktop5 com rescap">
+  <Identity
+    Name="WirDrop.ContextMenu"
+    Publisher="CN=WirDrop, OID.2.25.311729368913984317654407730594956997722=1"
+    Version="0.2.0.0"
+    ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>WirDrop</DisplayName>
+    <PublisherDisplayName>WirDrop</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Resources>
+    <Resource Language="ko-kr" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+  <Applications>
+    <Application Id="WirDrop" Executable="WirDrop.exe" uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="WirDrop"
+        Description="AirDrop for Windows"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="WirDropAirDrop" Clsid="ed292880-3e62-4dbd-8a9a-f484b710a740" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="WirDropAirDropFolder" Clsid="ed292880-3e62-4dbd-8a9a-f484b710a740" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="WirDropAirDropHere" Clsid="ed292880-3e62-4dbd-8a9a-f484b710a740" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="WirDrop AirDrop menu">
+              <com:Class Id="ed292880-3e62-4dbd-8a9a-f484b710a740" Path="wirdrop_shell.dll" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
+

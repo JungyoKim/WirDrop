@@ -1,0 +1,22 @@
+[package]
+name = "wirdrop-appleid-anisette"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "The anisette headers Apple's sign-in wants, from iCloud for Windows' own 32-bit AOSKit, for appleid.exe"
+repository = "https://github.com/JungyoKim/WirDrop"
+publish = false
+
+[[bin]]
+name = "appleid-anisette"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+] }
+

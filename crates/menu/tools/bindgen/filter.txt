@@ -1,0 +1,67 @@
+Microsoft::UI::WindowId
+Microsoft::UI::Content::ContentSizePolicy::ResizeContentToParentWindow
+Microsoft::UI::Content::IDesktopChildSiteBridge::put_ResizePolicy
+Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread
+Microsoft::UI::Dispatching::DispatcherQueueHandler
+Microsoft::UI::Dispatching::DispatcherQueuePriority::{High, Low, Normal}
+Microsoft::UI::Dispatching::IDispatcherQueue::TryEnqueueWithPriority
+Microsoft::UI::Xaml::Application::{CreateInstance, Current, Start}
+Microsoft::UI::Xaml::ApplicationInitializationCallback
+Microsoft::UI::Xaml::IApplication::get_Resources
+Microsoft::UI::Xaml::IApplicationOverrides::{}
+Microsoft::UI::Xaml::LaunchActivatedEventArgs
+Microsoft::UI::Xaml::IResourceDictionary::get_MergedDictionaries
+Microsoft::UI::Xaml::Markup::IXamlMetadataProvider
+Microsoft::UI::Xaml::Markup::IXamlType::{}
+Microsoft::UI::Xaml::Markup::XmlnsDefinition
+Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider::CreateInstance
+Microsoft::UI::Xaml::Controls::XamlControlsResources::CreateInstance
+Microsoft::UI::Xaml::Controls::MenuFlyout::CreateInstance
+Microsoft::UI::Xaml::Controls::MenuFlyoutItem::CreateInstance
+Microsoft::UI::Xaml::Controls::MenuFlyoutSeparator::CreateInstance
+Microsoft::UI::Xaml::Controls::MenuFlyoutSubItem::CreateInstance
+Microsoft::UI::Xaml::Controls::ToggleMenuFlyoutItem::CreateInstance
+Microsoft::UI::Xaml::Controls::RadioMenuFlyoutItem::CreateInstance
+Microsoft::UI::Xaml::Controls::FontIcon::CreateInstance
+Microsoft::UI::Xaml::Controls::Grid::CreateInstance
+Microsoft::UI::Xaml::Controls::IMenuFlyout::get_Items
+Microsoft::UI::Xaml::Controls::IMenuFlyoutItem::{add_Click, put_Icon, put_Text, remove_Click}
+Microsoft::UI::Xaml::Controls::IMenuFlyoutSubItem::{get_Items, put_Icon, put_Text}
+Microsoft::UI::Xaml::Controls::IToggleMenuFlyoutItem::put_IsChecked
+Microsoft::UI::Xaml::Controls::IRadioMenuFlyoutItem::{put_GroupName, put_IsChecked}
+Microsoft::UI::Xaml::Controls::IFontIcon::put_Glyph
+Microsoft::UI::Xaml::Controls::IControl::put_IsEnabled
+Microsoft::UI::Xaml::Controls::IPanel::get_Children
+Microsoft::UI::Xaml::Controls::UIElementCollection::{}
+Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBase::{add_Closed, Hide, put_Placement, put_ShouldConstrainToRootBounds, put_XamlRoot, remove_Closed, ShowAt}
+Microsoft::UI::Xaml::ElementTheme::{Dark, Default, Light}
+Microsoft::UI::Xaml::HorizontalAlignment
+Microsoft::UI::Xaml::VerticalAlignment
+Microsoft::UI::Xaml::Hosting::DesktopWindowXamlSource::CreateInstance
+Microsoft::UI::Xaml::Hosting::IDesktopWindowXamlSource::{Initialize, get_SiteBridge, put_Content}
+Microsoft::UI::Xaml::Hosting::IDesktopWindowXamlSource2::put_ShouldConstrainPopupsToWorkArea
+Microsoft::UI::Xaml::IFrameworkElement::{add_Loaded, put_Height, put_HorizontalAlignment, put_RequestedTheme, put_VerticalAlignment, put_Width, remove_Loaded}
+Microsoft::UI::Xaml::IUIElement::get_XamlRoot
+Microsoft::UI::Xaml::IUIElement::{add_KeyDown, Focus, put_Opacity, remove_KeyDown}
+Microsoft::UI::Xaml::IFrameworkElement::{put_MinWidth, put_MaxWidth}
+Microsoft::UI::Xaml::FocusState::Programmatic
+Microsoft::UI::Xaml::TextWrapping::Wrap
+Microsoft::UI::Xaml::Input::KeyEventHandler
+Microsoft::UI::Xaml::Input::KeyRoutedEventArgs
+Microsoft::UI::Xaml::Input::IKeyRoutedEventArgs::{get_Key, put_Handled}
+Windows::System::VirtualKey::{Enter, Escape}
+Microsoft::UI::Xaml::Controls::Flyout::CreateInstance
+Microsoft::UI::Xaml::Controls::IFlyout::put_Content
+Microsoft::UI::Xaml::Controls::TextBox::CreateInstance
+Microsoft::UI::Xaml::Controls::ITextBox::{get_Text, put_PlaceholderText, put_Text, SelectAll}
+Microsoft::UI::Xaml::Controls::TextBlock::CreateInstance
+Microsoft::UI::Xaml::Controls::ITextBlock::{put_FontSize, put_Text, put_TextWrapping}
+Microsoft::UI::Xaml::Controls::StackPanel::CreateInstance
+Microsoft::UI::Xaml::Controls::IStackPanel::put_Spacing
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBase::{add_Opened, remove_Opened}
+Microsoft::UI::Xaml::Markup::XamlReader::Load
+Microsoft::UI::Xaml::Controls::ControlTemplate::{}
+Microsoft::UI::Xaml::Controls::IControl::put_Template
+Microsoft::UI::Xaml::Controls::IControl::put_Padding
+Microsoft::UI::Xaml::Thickness

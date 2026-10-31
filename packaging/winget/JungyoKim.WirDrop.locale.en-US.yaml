@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.9.0.schema.json
+PackageIdentifier: JungyoKim.WirDrop
+PackageVersion: {{VERSION}}
+PackageLocale: en-US
+Publisher: JungyoKim
+PublisherUrl: https://github.com/JungyoKim
+PublisherSupportUrl: https://github.com/JungyoKim/WirDrop/issues
+PackageName: WirDrop
+PackageUrl: https://github.com/JungyoKim/WirDrop
+License: MIT
+LicenseUrl: https://github.com/JungyoKim/WirDrop/blob/main/LICENSE
+ShortDescription: AirDrop files between Windows 11 and an iPhone or iPad.
+Description: |-
+  Right-click a file in Explorer to send it to an iPhone or iPad, and pick this PC in the iPhone's
+  share sheet to receive. WirDrop drives AirDrop's Wi-Fi link (AWDL) on a USB Wi-Fi adapter, so it
+  needs a supported one such as the TP-Link Archer T3U Nano (Realtek RTL8812BU). It installs no
+  kernel driver.
+ReleaseNotesUrl: https://github.com/JungyoKim/WirDrop/releases/tag/v{{VERSION}}
+ManifestType: locale
+ManifestVersion: 1.9.0

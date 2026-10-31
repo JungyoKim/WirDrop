@@ -1,0 +1,38 @@
+[package]
+name = "wirdrop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "AirDrop-compatible file transfer for Windows: AWDL through a WinUSB Realtek adapter driven by usbfwd, a Wintun awdl0 interface, and owly's AirDrop protocol"
+repository = "https://github.com/JungyoKim/WirDrop"
+publish = false
+
+[dependencies]
+owly-awdl = { path = "../../vendor/owly-awdl", features = ["driver"] }
+owly-airdrop = { path = "../../vendor/owly-airdrop", features = ["mdns"] }
+getrandom = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "fs", "io-util"] }
+tracing = "0.1"
+wintun = "0.5.1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+windows = { version = "0.62", features = [
+    "Devices_Bluetooth_Advertisement",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
