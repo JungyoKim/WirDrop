@@ -40,7 +40,7 @@ use std::io;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::os::windows::io::AsRawSocket;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use wirdrop_radio::dm::{Dm, rssi_of};
@@ -310,6 +310,12 @@ struct Relay {
     last_data_ns: AtomicI64,
     ack_host_us: Mutex<Vec<u32>>,
     ack_air_us: Mutex<Vec<u32>>,
+    /// 상대가 보내는 파일 내용만 본 이번 통계 구간 ([Bulk]).
+    bulk: Mutex<Bulk>,
+    /// 마지막으로 받은 프레임의 PPDU 카운터, 그리고 지금 PPDU에서 큰 데이터 프레임을 이미 셌는지:
+    /// 묶음 크기를 PPDU 단위로 셉니다.
+    prev_ppdu: AtomicU8,
+    ppdu_bulk: AtomicBool,
 }
 
 /// 데이터를 주고받는 상대가 우리 채널에 머무는 비율: AWDL 상대는 자기 Wi-Fi 네트워크의 채널도
@@ -335,6 +341,92 @@ struct PathStats {
     pwr: [i64; 2],
     snr: [i64; 2],
     evm: [i64; 2],
+}
+
+/// 이보다 큰 데이터 프레임을 파일 내용으로 봅니다. 상대가 우리 데이터에 답하는 TCP ACK와 Null
+/// 프레임은 작고 묶이지 않으며 20 MHz로도 와서, 누적 "rx rate" 줄을 흐립니다.
+const BULK: usize = 1000;
+/// 서술자 속도 코드의 수 ([rate_name]: VHT 4스트림까지).
+const RATES: usize = 84;
+
+/// 우리에게 온 큰 데이터 프레임만 본 한 통계 구간: 상대가 어떤 속도로, 몇 개씩 묶어 보내는지, 그리고
+/// 같은 스트림 수의 프레임이 우리 쪽에서 얼마나 깨지는지. 상대가 2스트림을 두고 1스트림을 고른다면
+/// 그 까닭이 우리 수신(2스트림이 깨짐)인지, 확인 응답(재전송이 많음)인지를 가릅니다.
+struct Bulk {
+    frames: u64,
+    bytes: u64,
+    /// 재전송 비트가 켜진 프레임: 상대가 우리 확인을 못 받았다고 본 것.
+    retries: u64,
+    /// 큰 데이터 프레임이 하나라도 든 PPDU.
+    ppdus: u64,
+    /// 속도 코드마다 받은 바이트.
+    bytes_at: [u64; RATES],
+    /// PPDU의 대역폭 (PHY 상태는 PPDU의 첫 MPDU에만 있습니다): 20, 40, 80 MHz.
+    bw: [u64; 3],
+    /// 속도 코드마다 CRC가 맞은 것과 깨진 HT·VHT MPDU. 깨진 프레임은 주소를 믿을 수 없어 모든
+    /// 송신자를 셉니다 (전송 중에는 거의 모두 그 상대입니다).
+    ok_at: [u64; RATES],
+    bad_at: [u64; RATES],
+    /// 우리에게 온 채널 측정 (VHT NDPA): 상대가 우리 쪽으로 빔포밍하려고 묻는 것.
+    ndpa: u64,
+}
+
+impl Bulk {
+    const EMPTY: Bulk = Bulk {
+        frames: 0,
+        bytes: 0,
+        retries: 0,
+        ppdus: 0,
+        bytes_at: [0; RATES],
+        bw: [0; 3],
+        ok_at: [0; RATES],
+        bad_at: [0; RATES],
+        ndpa: 0,
+    };
+
+    /// 통계 한 줄: 받은 양, 스트림 수마다 몫과 가장 많이 쓴 속도와 깨진 비율, 대역폭, 묶음 크기,
+    /// 재전송, 채널 측정.
+    fn summary(&self) -> String {
+        let pct = |part: u64, whole: u64| 100.0 * part as f64 / whole.max(1) as f64;
+        let mut per_stream = Vec::new();
+        for nss in 1..=2u8 {
+            let codes = || (0..RATES as u8).filter(move |&c| streams(c) == Some(nss));
+            let bytes: u64 = codes().map(|c| self.bytes_at[c as usize]).sum();
+            let (ok, bad) = codes().fold((0, 0), |(o, b), c| (o + self.ok_at[c as usize], b + self.bad_at[c as usize]));
+            let top = codes()
+                .filter(|&c| self.bytes_at[c as usize] > 0)
+                .max_by_key(|&c| self.bytes_at[c as usize])
+                .map(rate_name)
+                .unwrap_or_else(|| "-".into());
+            let lost = if ok + bad > 0 {
+                format!("{:.0}%", pct(bad, ok + bad))
+            } else {
+                "-".into()
+            };
+            per_stream.push(format!("{nss}SS {:.0}% (mostly {top}, CRC lost {lost})", pct(bytes, self.bytes)));
+        }
+        format!(
+            "bulk to us: {} frames {:.1} MB | {} | PPDU bw 20/40/80 {}/{}/{} | {:.1} MPDU per PPDU | retry {:.0}% | NDPA {}",
+            self.frames,
+            self.bytes as f64 / 1e6,
+            per_stream.join(" | "),
+            self.bw[0],
+            self.bw[1],
+            self.bw[2],
+            self.frames as f64 / self.ppdus.max(1) as f64,
+            pct(self.retries, self.frames),
+            self.ndpa
+        )
+    }
+}
+
+/// 속도 코드의 공간 스트림 수 (HT·VHT만, [rate_name]과 같은 배치).
+fn streams(code: u8) -> Option<u8> {
+    match code {
+        12..=43 => Some((code - 12) / 8 + 1),
+        44..=83 => Some((code - 44) / 10 + 1),
+        _ => None,
+    }
 }
 
 impl Relay {
@@ -416,6 +508,17 @@ impl Relay {
     /// 무선으로 가는 프레임에 번호를 매기고 A-MPDU에 실어도 되는지 말합니다.
     fn prepare_tx(&self, f: &mut [u8]) -> bool {
         let n = f.len();
+        if n >= 33 && f[0] == 0xd0 && f[24] == 3 && f[25] == 1 {
+            // 상대의 Block Ack 요청에 우리가 내는 답: 상대가 한 번에 보낼 수 있는 양을 정합니다.
+            let params = u16::from_le_bytes([f[29], f[30]]);
+            log!(
+                "Block Ack answered to {}: status {}, window {}, A-MSDU {}",
+                mac_str(&f[4..10]),
+                u16::from_le_bytes([f[27], f[28]]),
+                (params >> 6) & 0x3ff,
+                if params & 1 != 0 { "yes" } else { "no" }
+            );
+        }
         if !self.tx_ba || n < 24 || f[4] & 1 != 0 {
             return false;
         }
@@ -573,9 +676,19 @@ impl Relay {
         let s = &self.stats;
         s.rx_all.fetch_add(1, Relaxed);
         self.last_rx_ns.store(now_ns(), Relaxed);
+        if self.prev_ppdu.swap(p.ppdu_cnt, Relaxed) != p.ppdu_cnt {
+            self.ppdu_bulk.store(false, Relaxed);
+        }
+        let ht = streams(p.rate).is_some();
         if p.crc_err || p.icv_err {
             s.rx_bad.fetch_add(1, Relaxed);
+            if p.crc_err && ht {
+                self.bulk.lock().unwrap().bad_at[p.rate as usize] += 1;
+            }
             return;
+        }
+        if ht {
+            self.bulk.lock().unwrap().ok_at[p.rate as usize] += 1;
         }
         if let Some(phy) = p.phy {
             self.last_rssi.store(phy.power[0] as i64, Relaxed);
@@ -678,6 +791,7 @@ impl Relay {
                 // VHT NDPA: 채널을 측정하는 상대
                 if to_us {
                     s.ndpa_to_us.fetch_add(1, Relaxed);
+                    self.bulk.lock().unwrap().ndpa += 1;
                     if self.ndpa_logged.fetch_add(1, Relaxed) < 3 {
                         let info = u16::from_le_bytes([f[17], f[18]]);
                         log!(
@@ -700,11 +814,39 @@ impl Relay {
         if self.tx_ba && to_us && f[0] == 0xd0 && len >= 26 && f[24] == 3 {
             self.on_ba_action(f);
         }
+        if to_us && f[0] == 0xd0 && len >= 33 && f[24] == 3 && f[25] == 0 {
+            // 상대의 Block Ack 요청: 상대가 원하는 창.
+            let params = u16::from_le_bytes([f[27], f[28]]);
+            log!(
+                "Block Ack asked by {}: TID {}, window {}, A-MSDU {}",
+                mac_str(&f[10..16]),
+                (params >> 2) & 0x0f,
+                (params >> 6) & 0x3ff,
+                if params & 1 != 0 { "yes" } else { "no" }
+            );
+        }
         if to_us && ty == 2 {
             s.rx_to_us.fetch_add(1, Relaxed);
             s.rx_to_us_bytes.fetch_add(len as u64, Relaxed);
             if len > 200 {
                 self.last_data_ns.store(now_ns(), Relaxed);
+            }
+            if len >= BULK {
+                let mut b = self.bulk.lock().unwrap();
+                b.frames += 1;
+                b.bytes += len as u64;
+                if f[1] & 0x08 != 0 {
+                    b.retries += 1;
+                }
+                if !self.ppdu_bulk.swap(true, Relaxed) {
+                    b.ppdus += 1;
+                }
+                if let Some(at) = b.bytes_at.get_mut(p.rate as usize) {
+                    *at += len as u64;
+                }
+                if let Some(phy) = p.phy {
+                    b.bw[(phy.bw as usize).min(2)] += 1;
+                }
             }
             let mut ta = [0u8; 6];
             ta.copy_from_slice(&f[10..16]);
@@ -921,6 +1063,13 @@ impl Relay {
                 if pc > 0 { g(&s.ppdu_frames) as f64 / pc as f64 } else { 0.0 },
                 g(&s.rx_to_us_bytes) as f64 / g(&s.rx_to_us).max(1) as f64
             );
+        }
+        {
+            // 파일 내용만 본 이번 구간: 전송이 있었을 때만 남기고, 구간마다 비웁니다.
+            let b = std::mem::replace(&mut *self.bulk.lock().unwrap(), Bulk::EMPTY);
+            if b.frames >= 200 {
+                log!("{}", b.summary());
+            }
         }
         {
             let mut c = self.crc.lock().unwrap();
@@ -1248,6 +1397,9 @@ fn run() -> io::Result<()> {
         last_data_ns: AtomicI64::new(0),
         ack_host_us: Mutex::new(Vec::new()),
         ack_air_us: Mutex::new(Vec::new()),
+        bulk: Mutex::new(Bulk::EMPTY),
+        prev_ppdu: AtomicU8::new(0),
+        ppdu_bulk: AtomicBool::new(false),
     };
     if tx_ba {
         log!("Block Ack mode on: A-MPDU of up to {ampdu_max} MPDUs to peers that agree, USB TX aggregation 3");
