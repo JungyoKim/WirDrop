@@ -195,7 +195,9 @@ impl Aos {
 }
 
 impl Aos {
-    /// 등록 시작: 서버가 준 spim으로 서버에 보낼 cpim과, 끝낼 때 쓸 session을 만듭니다.
+    /// 등록 시작: 서버가 준 spim으로 서버에 보낼 cpim과, 끝낼 때 쓸 session을 만듭니다. 이때 전에
+    /// 있던 등록은 지워지므로, 부르기 전에 서버와 할 이야기를 모두 끝내 두고 (appleid의 anisette.rs)
+    /// 바로 [Aos::provision_end]까지 가야 합니다.
     ///
     /// # Safety
     /// Apple 런타임을 불러온 스레드에서.

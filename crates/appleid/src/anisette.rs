@@ -18,6 +18,11 @@ const ICLOUD_SETUP_SHA256: &str = "1100052f27c8ebf6eea57b05682eb4a5a75efd50d7ed1
 /// 풀어 둔 사본 안의 Apple Application Support (32비트)와 Internet Services (AOSKit).
 const SUPPORT: &str = r"a\AAS32\Common Files\Apple\Apple Application Support";
 const SERVICES: &str = r"a\iCloud64\Common Files\Apple\Internet Services";
+/// Apple이 함께 넣어 주는 Microsoft 런타임 둘. AOSKit은 Visual C++ 2010(msvcr100)을, 나머지는 2015
+/// 이후(vcruntime140)를 씁니다. PC에 그것이 깔려 있지 않아도 되도록 둘 다 PATH에 둡니다: 2010 것이
+/// 없는 PC에서는 AOSKit이 "모듈을 찾을 수 없습니다"로 열리지 않았습니다.
+const RUNTIME_2010: &str = r"a\AAS32\Win\System";
+const RUNTIME_2015: &str = r"a\AAS32\System";
 /// appleid-anisette가 AOSKit의 HKLM\SOFTWARE\Apple Inc. 조회를 돌리는 곳.
 const REDIRECTED: &str = r"Software\WirDrop\HKLM\SOFTWARE\Apple Inc.";
 /// 이 PC의 다른 사람 Apple ID를 위한 로그인 자체의 로컬 사용자.
@@ -66,12 +71,14 @@ impl Anisette {
             set_install_dir(&format!(r"{REDIRECTED}\{name}"), &format!("{}\\", dir.display()))?;
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("appleid-anisette.exe");
-        let path = format!(
-            "{};{};{}",
-            support.display(),
-            services.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = [
+            support.display().to_string(),
+            services.display().to_string(),
+            home.join(RUNTIME_2010).display().to_string(),
+            home.join(RUNTIME_2015).display().to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        ]
+        .join(";");
         let mut helper = Command::new(&exe)
             .env("PATH", path)
             .stdin(Stdio::piped())
@@ -295,7 +302,9 @@ fn icloud_home() -> PathBuf {
 }
 
 fn unpacked(home: &Path) -> bool {
-    home.join(SUPPORT).join("objc.dll").is_file() && home.join(SERVICES).join("AOSKit.dll").is_file()
+    home.join(SUPPORT).join("objc.dll").is_file()
+        && home.join(SERVICES).join("AOSKit.dll").is_file()
+        && home.join(RUNTIME_2010).join("msvcr100.dll").is_file()
 }
 
 /// Apple에서 iCloudSetup.exe를 받아 확인하고, 그 안의 MSI 두 개를 Windows 자체의 expand와 msiexec
