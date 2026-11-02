@@ -182,7 +182,8 @@ async fn sign_in(out: &Path, request: Value) -> Result<SignedIn, String> {
     save_session(out, &session)?;
     let token = match gsa::airdrop_token(&session, &mut anisette).await {
         Ok(token) => token,
-        Err(gsa::Fault::Busy(_)) => return Ok(SignedIn::Later),
+        // 로그인은 끝났고 세션도 저장했습니다. 토큰만 늦는 것이면 갱신이 마저 받아 옵니다.
+        Err(gsa::Fault::Busy(_) | gsa::Fault::Unreachable(_)) => return Ok(SignedIn::Later),
         Err(e) => return Err(format!("Apple didn't give the AirDrop token: {e}")),
     };
     secret::write(&out.join(APP_TOKEN), token.as_bytes())?;

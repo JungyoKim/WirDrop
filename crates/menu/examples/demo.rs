@@ -109,6 +109,7 @@ fn tray() -> Vec<Entry> {
         Entry::sub(t("알림 위치", "Notification position"), island).glyph(BELL),
         Entry::toggle("autostart", t("부팅 시 켜기", "Open at boot"), true),
         Entry::separator(),
+        Entry::label("WirDrop 0.2.5"),
         Entry::item("exit", t("종료", "Quit")).glyph(POWER),
     ]
 }

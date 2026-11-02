@@ -8,9 +8,10 @@ impl Hub {
         if self.exiting || !crate::service::installed_here() {
             return;
         }
+        let again = if self.update_failed { UPDATE_RETRY } else { UPDATE_EVERY };
         let due = match self.update_checked {
             None => self.started.elapsed() > UPDATE_FIRST,
-            Some(t) => t.elapsed() > UPDATE_EVERY,
+            Some(t) => t.elapsed() > again,
         };
         if due && !self.checking_update && self.update.is_none() {
             self.checking_update = true;
@@ -23,11 +24,12 @@ impl Hub {
         if self.update.is_none() || self.updating {
             return;
         }
+        // 주고받는 중이면 끝나기를 기다립니다. 켠 뒤로 아무것도 없었으면 (다시 켠 직후) 바로 들입니다.
         if self.busy() {
-            self.quiet_since = None;
+            self.busy_at = Some(Instant::now());
             return;
         }
-        if self.quiet_since.get_or_insert_with(Instant::now).elapsed() >= UPDATE_QUIET {
+        if self.busy_at.is_none_or(|t| t.elapsed() >= UPDATE_QUIET) {
             self.begin_update();
         }
     }
@@ -40,6 +42,9 @@ impl Hub {
     /// 엔진을 놓아 주고 서비스가 업데이트를 놓게 합니다.
     pub(super) fn begin_update(&mut self) {
         let Some(manifest) = &self.update else { return };
+        if self.updating {
+            return;
+        }
         tracing::info!("updating to {}", manifest.version);
         self.updating = true;
         self.to_engine(Msg::Shutdown);
@@ -67,13 +72,22 @@ impl Hub {
                     Err(e) => tracing::error!("updated, but the new version won't start: {e}"),
                 }
             }
-            Ok(crate::service::UP_TO_DATE) => tracing::info!("update: nothing newer after all"),
-            Ok(code) => tracing::warn!("update failed ({code}): logs\\update.log"),
-            Err(e) => tracing::warn!("update failed: {e}"),
+            Ok(crate::service::UP_TO_DATE) => {
+                tracing::info!("update: nothing newer after all");
+                self.update_failed = false;
+            }
+            Ok(code) => {
+                tracing::warn!("update failed ({code}): logs\\update.log");
+                self.update_failed = true;
+            }
+            Err(e) => {
+                tracing::warn!("update failed: {e}");
+                self.update_failed = true;
+            }
         }
         self.updating = false;
         self.update = None;
-        self.quiet_since = None;
+        self.busy_at = None;
         self.launched = None;
         self.ensure_engine();
         self.push();

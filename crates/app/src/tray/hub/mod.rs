@@ -65,6 +65,8 @@ pub enum MenuCmd {
     ToggleReceive,
     ToggleAutostart,
     Reconnect,
+    /// 찾아 둔 새 릴리스를 지금 들입니다.
+    UpdateNow,
     Exit,
     /// 카드 버튼의 인자를 메뉴에서 고름: 아일랜드가 없을 때 트레이 아이콘의 메뉴가 대신 묻고 알립니다.
     Press(String),
@@ -134,11 +136,13 @@ const PENDING_TRIES: u32 = 10;
 const NOTICE_FOR: Duration = Duration::from_secs(15);
 /// 찾기(엔진의 BLE 깨우기)가 마지막 요청 뒤 이어지는 시간.
 const SEARCH_FOR: Duration = Duration::from_secs(90);
-/// 업데이트: 시작하고 좀 지나서 (시작을 방해하지 않게) 처음 보고, 그다음 몇 시간마다. 새 릴리스는
-/// 1분 동안 아무 일이 없으면 들입니다.
-const UPDATE_FIRST: Duration = Duration::from_secs(2 * 60);
-const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// 업데이트: 켜고 바로 한 번 보고 (다시 켜면 기다리지 않고 올라가도록), 그다음 몇 시간마다. 켠 뒤로
+/// 주고받은 것이 없으면 바로, 있었으면 끝나고 1분 뒤에 들입니다.
+const UPDATE_FIRST: Duration = Duration::from_secs(5);
+const UPDATE_EVERY: Duration = Duration::from_secs(3600);
 const UPDATE_QUIET: Duration = Duration::from_secs(60);
+/// 업데이트가 실패한 뒤 다시 볼 때까지. 대개 한 번 더 하면 됩니다.
+const UPDATE_RETRY: Duration = Duration::from_secs(30 * 60);
 
 pub struct Hub {
     events: UnboundedSender<HubEvent>,
@@ -184,8 +188,10 @@ pub struct Hub {
     update: Option<crate::update::Manifest>,
     /// 서비스가 업데이트를 놓는 중: 그동안 엔진은 내려가 있습니다.
     updating: bool,
-    /// 보내기, 받기, 묻기, 로그인이 아무것도 없게 된 때.
-    quiet_since: Option<Instant>,
+    /// 보내기, 받기, 묻기, 로그인을 마지막으로 하던 때. 켠 뒤로 아무것도 없었으면 None입니다.
+    busy_at: Option<Instant>,
+    /// 마지막 업데이트가 실패했습니다: [UPDATE_RETRY] 뒤에 다시 봅니다.
+    update_failed: bool,
 }
 
 pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<HubEvent>, ui: UiHandle, greet: bool) {
@@ -225,7 +231,8 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
         checking_update: false,
         update: None,
         updating: false,
-        quiet_since: None,
+        busy_at: None,
+        update_failed: false,
     };
     tracing::info!("adapter: {:?}, Explorer menu: {menu_installed}", hub.adapter);
     tokio::spawn(serve(events.clone()));
@@ -650,6 +657,7 @@ impl Hub {
             MenuCmd::ToggleReceive => self.change(Change::Receive(!self.settings.receive)),
             MenuCmd::ToggleAutostart => self.change(Change::Autostart(!elevate::autostart())),
             MenuCmd::Reconnect => self.restart_engine(),
+            MenuCmd::UpdateNow => self.begin_update(),
             MenuCmd::Exit => self.exit(),
         }
     }
@@ -748,6 +756,9 @@ impl Hub {
                 })
                 .collect(),
             receiving: self.asks.values().filter(|a| a.card.is_some()).map(|a| a.info.sender.clone()).collect(),
+            version: crate::update::CURRENT,
+            update: self.update.as_ref().map(|m| m.version.clone()),
+            updating: self.updating,
         }
     }
 

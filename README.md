@@ -77,7 +77,8 @@ Mac. Optional, and your password is never stored.
 3. On the iPhone, tap **Share**, then **AirDrop**, and pick this PC. To send the other way,
    right-click a file on the PC and choose **AirDrop**.
 
-Updates install themselves when nothing is being sent or received.
+Updates install themselves when nothing is being sent or received. The tray menu shows the version
+it's running, and the new one while it installs.
 
 <details>
 <summary><b>Why does it need a USB adapter?</b></summary>

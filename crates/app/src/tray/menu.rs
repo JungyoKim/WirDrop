@@ -34,6 +34,7 @@ const SAVE: char = '\u{E74E}';
 const CHECK: char = '\u{E73E}';
 const ALWAYS: char = '\u{E8FB}';
 const CANCEL: char = '\u{E711}';
+const UPDATE: char = '\u{E777}';
 
 /// 메뉴에 뜨는 허브 알림([notice_entries])의 앞 아이콘.
 pub const WARNING_GLYPH: char = WARNING;
@@ -73,9 +74,22 @@ pub fn entries(view: &TrayView) -> Vec<Entry> {
         Entry::sub(t!("알림 위치", "Notification position"), island_items(s)).glyph(BELL),
         Entry::toggle("autostart", t!("부팅 시 켜기", "Open at boot"), s.autostart),
         Entry::separator(),
+        version_item(s),
         Entry::item("exit", t!("종료", "Quit")).glyph(POWER),
     ]);
     items
+}
+
+/// 버전 한 줄: 보통은 지금 버전, 새 릴리스를 찾았으면 눌러서 바로 들이는 항목, 들이는 중이면 그 말.
+/// 업데이트는 알아서 들어오므로 ([crate::update] 참고) 누를 일은 없고, 무엇이 오는지 보여 줍니다.
+fn version_item(s: &Snapshot) -> Entry {
+    if s.updating {
+        return Entry::label(t!("업데이트하는 중…", "Updating…")).glyph(UPDATE);
+    }
+    match &s.update {
+        Some(version) => Entry::item("update", tf!("새 버전 {version} 설치", "Install {version}")).glyph(UPDATE),
+        None => Entry::label(format!("WirDrop {}", s.version)),
+    }
 }
 
 /// iPhone처럼 이 PC에 누가 보낼 수 있는지: 아무도, 연락처만(누구인지 알려면 Apple ID가 필요), 모든
@@ -368,6 +382,7 @@ pub fn pick(key: &str, view: &TrayView) -> Option<Picked> {
         }
         "autostart" => MenuCmd::ToggleAutostart,
         "restart" => MenuCmd::Reconnect,
+        "update" => MenuCmd::UpdateNow,
         "exit" => MenuCmd::Exit,
         "press" => MenuCmd::Press(rest.to_string()),
         _ => return None,

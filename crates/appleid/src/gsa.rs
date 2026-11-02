@@ -91,9 +91,9 @@ async fn call(request: Dictionary) -> Result<Dictionary, Fault> {
         .body(body)
         .send()
         .await
-        .map_err(|e| Fault::Other(e.to_string()))?;
+        .map_err(|e| Fault::Unreachable(e.to_string()))?;
     let status = res.status();
-    let bytes = res.bytes().await.map_err(|e| Fault::Other(e.to_string()))?;
+    let bytes = res.bytes().await.map_err(|e| Fault::Unreachable(e.to_string()))?;
     let Ok(Value::Dictionary(mut reply)) = plist::from_bytes::<Value>(&bytes) else {
         // plist 대신 오류 페이지: GrandSlam이 바쁨(503) 같은 것.
         return Err(Fault::Busy(status.as_u16()));
@@ -112,7 +112,22 @@ pub enum Fault {
     Refused(i64, String),
     /// plist가 오지 않았고 HTTP 상태는 이것.
     Busy(u16),
+    /// 답이 오지 않았습니다 (연결이 끊기거나 시간이 다 됨). 바쁜 GrandSlam은 503 대신 이렇게도
+    /// 답하므로, 기다렸다 다시 하면 되는 쪽으로 봅니다.
+    Unreachable(String),
     Other(String),
+}
+
+impl Fault {
+    /// 로그 한 줄에 넣을 짧은 까닭.
+    fn brief(&self) -> String {
+        match self {
+            Fault::Refused(code, _) => format!("error {code}"),
+            Fault::Busy(status) => format!("HTTP {status}"),
+            Fault::Unreachable(_) => "no answer".into(),
+            Fault::Other(message) => message.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for Fault {
@@ -120,6 +135,7 @@ impl std::fmt::Display for Fault {
         match self {
             Fault::Refused(code, message) => write!(f, "{message} ({code})"),
             Fault::Busy(status) => write!(f, "Apple's sign-in server is busy (HTTP {status})"),
+            Fault::Unreachable(message) => write!(f, "Apple's server didn't answer ({message})"),
             Fault::Other(message) => f.write_str(message),
         }
     }
@@ -174,9 +190,12 @@ pub async fn sign_in(account: &str, password: &str, anisette: &mut Anisette, cod
         match password_round(account, password, anisette).await {
             // 두 번째에 주는 것이 가진 전부입니다: 아직 무엇을 원한다고 하든.
             Ok((session, _)) => return Ok(session),
-            Err(Fault::Busy(status)) if tries < BUSY_TRIES => {
+            Err(e @ (Fault::Busy(_) | Fault::Unreachable(_))) if tries < BUSY_TRIES => {
                 tries += 1;
-                say!("Apple's sign-in server is busy (HTTP {status}); trying again in 30 s ({tries}/{BUSY_TRIES})");
+                say!(
+                    "Apple's sign-in server is busy ({}); trying again in 30 s ({tries}/{BUSY_TRIES})",
+                    e.brief()
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
             Err(e) => return Err(e.into()),
@@ -374,14 +393,15 @@ async fn verify_text_code(session: &Session, anisette: &mut Anisette, phone: u64
 }
 
 /// 세션으로 (암호 없이) 받는 AirDrop 앱 토큰: aidc.apple.com의 X-Apple-GS-Token, "adsid:token"의
-/// base64. GrandSlam이 바쁘면 (오류 페이지, 503) 5분쯤까지 다시 청합니다 ([TOKEN_WAITS] 참고).
+/// base64. GrandSlam이 바쁘면 (오류 페이지로 503을 주거나 아예 답하지 않습니다) 5분쯤까지 다시
+/// 청합니다 ([TOKEN_WAITS] 참고).
 pub async fn airdrop_token(session: &Session, anisette: &mut Anisette) -> Result<String, Fault> {
     let mut waits = TOKEN_WAITS.iter();
     loop {
         match buy_airdrop_token(session, anisette).await {
-            Err(Fault::Busy(status)) => {
-                let Some(&wait) = waits.next() else { return Err(Fault::Busy(status)) };
-                say!("Apple isn't giving the AirDrop token yet (HTTP {status}); asking again in {wait} s");
+            Err(e @ (Fault::Busy(_) | Fault::Unreachable(_))) => {
+                let Some(&wait) = waits.next() else { return Err(e) };
+                say!("Apple isn't giving the AirDrop token yet ({}); asking again in {wait} s", e.brief());
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
             other => return other,

@@ -18,6 +18,12 @@ pub struct Snapshot {
     pub asks: Vec<AskLine>,
     /// 지금 파일을 받고 있는 보내는 사람들.
     pub receiving: Vec<String>,
+    /// 지금 도는 WirDrop의 버전.
+    pub version: &'static str,
+    /// 찾아 둔 새 릴리스의 버전.
+    pub update: Option<String>,
+    /// 그 릴리스를 지금 들이는 중입니다.
+    pub updating: bool,
 }
 
 /// 보낼 곳으로 내보일 기기.
