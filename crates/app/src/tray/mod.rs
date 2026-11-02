@@ -65,6 +65,11 @@ type ShareRequest = Arc<Mutex<Option<Vec<std::path::PathBuf>>>>;
 type NoticeRequest = Arc<Mutex<Option<(Vec<wirdrop_menu::Entry>, std::time::Duration)>>>;
 
 impl UiHandle {
+    /// 클립보드의 주인이 될 창 ([crate::clipboard] 참고).
+    pub fn hwnd(&self) -> isize {
+        self.hwnd
+    }
+
     pub fn update(&self, view: TrayView) {
         *self.view.lock().unwrap() = view;
         // SAFETY: 우리 창에 보냅니다.

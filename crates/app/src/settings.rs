@@ -81,6 +81,8 @@ pub struct Settings {
     /// 연락처와 이 PC Apple ID의 기기에만 보이고 모든 사람에게는 보이지 않습니다. 누구인지 알려면
     /// Apple ID가 있어야 하므로, 없으면 모든 사람에게 보입니다.
     pub contacts_only: bool,
+    /// 받은 것을 클립보드에도 올립니다 (clipboard.rs): 바로 붙여 넣을 수 있게.
+    pub clipboard: bool,
     pub save_dir: PathBuf,
     pub people: Vec<Person>,
     pub recent: Vec<Recent>,
@@ -96,6 +98,7 @@ impl Default for Settings {
             device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into()),
             receive: true,
             contacts_only: false,
+            clipboard: true,
             save_dir: crate::paths::downloads(),
             people: Vec::new(),
             recent: Vec::new(),

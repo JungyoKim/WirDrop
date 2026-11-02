@@ -52,6 +52,7 @@ fn tray() -> Vec<Entry> {
         Entry::radio("receive:contacts", t("연락처만", "Contacts only"), false),
         Entry::radio("receive:everyone", t("모든 사람", "Everyone"), true),
         Entry::separator(),
+        Entry::toggle("clipboard", t("클립보드에 복사", "Copy to clipboard"), true),
         Entry::sub(
             t("기억한 기기", "Known devices"),
             vec![Entry::sub(t("홍길동의 iPhone · iPhone 16 Pro", "John's iPhone · iPhone 16 Pro"), person).glyph(PERSON)],
@@ -109,7 +110,7 @@ fn tray() -> Vec<Entry> {
         Entry::sub(t("알림 위치", "Notification position"), island).glyph(BELL),
         Entry::toggle("autostart", t("부팅 시 켜기", "Open at boot"), true),
         Entry::separator(),
-        Entry::label("WirDrop 0.2.5"),
+        Entry::label("WirDrop 0.2.7"),
         Entry::item("exit", t("종료", "Quit")).glyph(POWER),
     ]
 }

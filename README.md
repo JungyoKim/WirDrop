@@ -23,7 +23,8 @@ No window to open: a tray icon, the right-click menu, and a Dynamic Island at th
 <td width="40%">
 <h3>Receive in one click</h3>
 When an iPhone shares with this PC, a card pours out of the screen edge. Your own devices and the
-people you trust go straight through.
+people you trust go straight through. What arrives lands on the clipboard too, so Ctrl+V pastes it
+into a chat or a document.
 </td>
 <td><img src="assets/screenshots/en/receive.png" alt="An AirDrop request on the island"></td>
 </tr>

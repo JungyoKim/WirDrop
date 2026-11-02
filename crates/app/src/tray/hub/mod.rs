@@ -546,10 +546,13 @@ impl Hub {
             }
             Msg::Urls { id: rid, urls } if from_engine => {
                 let sender = self.asks.remove(&rid).map(|a| a.info.sender).unwrap_or_else(|| "iPhone".into());
-                if let Some(url) = urls.first().filter(|u| u.starts_with("http://") || u.starts_with("https://"))
-                    && let Some(c) = &self.cards
-                {
-                    c.link(rid, &sender, url);
+                if let Some(url) = urls.first().filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
+                    if self.settings.clipboard {
+                        crate::clipboard::copy_link(self.ui.hwnd(), url);
+                    }
+                    if let Some(c) = &self.cards {
+                        c.link(rid, &sender, url);
+                    }
                 }
             }
             Msg::SendUpdate { job, state } if from_engine => self.job_update(job, state),
@@ -594,6 +597,7 @@ impl Hub {
                     reconfigure = true;
                 }
             }
+            Change::Clipboard(on) => self.settings.clipboard = on,
             Change::PersonRule { key, rule } => self.settings.set_rule(&key, rule),
             Change::ForgetPerson(key) => self.settings.forget(&key),
             Change::Model(model) => {

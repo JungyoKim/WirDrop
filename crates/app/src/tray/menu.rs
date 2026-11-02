@@ -103,6 +103,7 @@ fn receive_items(s: &Snapshot) -> Vec<Entry> {
         Entry::radio("receive:contacts", t!("연락처만", "Contacts only"), contacts).enabled(can_contacts),
         Entry::radio("receive:everyone", t!("모든 사람", "Everyone"), on && !contacts),
         Entry::separator(),
+        Entry::toggle("clipboard", t!("클립보드에 복사", "Copy to clipboard"), s.settings.clipboard),
         Entry::sub(t!("기억한 기기", "Known devices"), people_items(s)).glyph(PEOPLE),
     ]
 }
@@ -352,6 +353,7 @@ pub fn pick(key: &str, view: &TrayView) -> Option<Picked> {
                 contacts_only: false,
             },
         }),
+        "clipboard" => MenuCmd::Change(Change::Clipboard(!s?.settings.clipboard)),
         "rule" => {
             let rule = match rest.rsplit(':').next()? {
                 "accept" => Rule::Accept,

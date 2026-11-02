@@ -23,7 +23,8 @@
 <td width="40%">
 <h3>한 번에 받기</h3>
 iPhone이 이 PC로 공유하면 화면 가장자리에서 카드가 흘러나옵니다. 내 기기와 항상 수락으로 정한
-사람은 묻지 않고 바로 받습니다.
+사람은 묻지 않고 바로 받습니다. 받은 것은 클립보드에도 올라가, Ctrl+V로 대화창이나 문서에 바로
+붙여 넣을 수 있습니다.
 </td>
 <td><img src="../assets/screenshots/ko/receive.png" alt="아일랜드의 AirDrop 받기 요청"></td>
 </tr>

@@ -15,6 +15,7 @@
 #[macro_use]
 mod lang;
 
+mod clipboard;
 mod driver;
 mod elevate;
 mod engine;

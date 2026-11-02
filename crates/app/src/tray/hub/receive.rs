@@ -116,6 +116,10 @@ impl Hub {
                 &buttons,
             );
         }
+        // 붙여 넣을 수 있게 클립보드에도. 그림을 푸느라 카드와 알림이 늦지 않도록 따로 돕니다.
+        if self.settings.clipboard {
+            crate::clipboard::copy_received(self.ui.hwnd(), paths.clone());
+        }
         if self.open_when_done.remove(&id) {
             open_files(&paths);
         }

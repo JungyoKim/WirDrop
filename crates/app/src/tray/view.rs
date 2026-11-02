@@ -88,6 +88,8 @@ pub enum Change {
         contacts_only: bool,
     },
     SaveDir(PathBuf),
+    /// 받은 것을 클립보드에 올릴지.
+    Clipboard(bool),
     PersonRule {
         key: String,
         rule: Rule,
