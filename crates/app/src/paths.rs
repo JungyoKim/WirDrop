@@ -190,7 +190,7 @@ pub fn init_log(role: &str) {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 << 20) {
         let _ = std::fs::rename(&path, dir.join(format!("{role}.old.log")));
     }
-    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+    let Some(file) = open_log(&path, role) else {
         return;
     };
     let default = if role == "engine" {
@@ -210,4 +210,20 @@ pub fn init_log(role: &str) {
         previous(info);
     }));
     tracing::info!("WirDrop {} {role} started (pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
+}
+
+/// 로그 파일을 엽니다. 로그온 직후에는 백신이나 앞선 WirDrop이 파일을 잠깐 쥐고 있어 열리지 않을 수
+/// 있는데, 거기서 그냥 포기하면 그 뒤로 아무것도 남지 않습니다. 그래서 잠깐씩 다시 열어 보고, 그래도
+/// 안 되면 이 프로세스만의 이름으로 엽니다.
+fn open_log(path: &Path, role: &str) -> Option<std::fs::File> {
+    let open = |path: &Path| std::fs::OpenOptions::new().create(true).append(true).open(path);
+    for attempt in 0..10 {
+        match open(path) {
+            Ok(file) => return Some(file),
+            Err(_) if attempt < 9 => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => {}
+        }
+    }
+    let mine = path.with_file_name(format!("{role}-{}.log", std::process::id()));
+    open(&mine).ok()
 }
