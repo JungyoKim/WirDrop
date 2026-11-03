@@ -13,6 +13,12 @@ pub mod phy;
 /// 8822B의 rtw88 tx_pkt_desc_sz.
 pub const TX_DESC_SIZE: usize = 48;
 pub const RX_DESC_SIZE: usize = 24;
+/// [Rtl8822b::rx_reports]의 종류 (5비트, 88x2 벤더 드라이버의 rtw_dump_mac_rx_counters): MAC이 버린
+/// MPDU, 그리고 정상으로 받은 VHT MPDU. 버린 것은 무선으로는 멀쩡히 받고도 호스트에 넘기지 못한
+/// 것으로, 수신 FIFO(24 KB)가 USB로 퍼내는 것보다 빨리 찰 때 생깁니다: iPhone의 재전송 수와 거의
+/// 같았습니다. VHT 정상 수는 PHY의 CRC 카운터와 같은 규모로 움직여 고른 종류가 맞음을 보여 줍니다.
+pub const RXERR_MAC_DROP: u32 = 10;
+pub const RXERR_VHT_OK: u32 = 16;
 /// 송신 버퍼 페이지 (txff_size / 페이지 크기).
 const TXFF_PAGES: u16 = (262144 / 128) as u16;
 const RXFF_SIZE: u32 = 24576;
@@ -620,6 +626,24 @@ impl Rtl8822b {
         r.clr8(REG_RXDMA_AGG_PG_TH + 3, 1 << 7)?;
         let (size, timeout) = if on { (0x5u16, 0x20u16) } else { (0, 1) };
         r.w16(REG_RXDMA_AGG_PG_TH, size | (timeout << 8))
+    }
+
+    /// MAC의 수신 보고 카운터들을 읽고 한꺼번에 0으로 돌립니다 (REG_RXERR_RPT, 종류는 [RXERR_MAC_DROP]
+    /// 같은 상수). 리셋은 모든 종류를 지우므로 다 읽은 뒤 한 번만 합니다. 지난 호출 뒤의 수입니다.
+    pub fn rx_reports(&self, kinds: &[u32]) -> io::Result<Vec<u32>> {
+        const REG_RXERR_RPT: u32 = 0x0664;
+        const RESET: u32 = 1 << 27;
+        const SEL_BIT4: u32 = 1 << 26;
+        let r = &self.regs;
+        let mut counts = Vec::with_capacity(kinds.len());
+        for &kind in kinds {
+            let select = ((kind & 0xf) << 28) | if kind & 0x10 != 0 { SEL_BIT4 } else { 0 };
+            r.w32(REG_RXERR_RPT, select)?;
+            counts.push(r.r32(REG_RXERR_RPT)? & 0xffff);
+        }
+        r.w32(REG_RXERR_RPT, RESET)?;
+        r.w32(REG_RXERR_RPT, 0)?;
+        Ok(counts)
     }
 
     /// rtw_fw_send_general_info + rtw_fw_send_phydm_info.

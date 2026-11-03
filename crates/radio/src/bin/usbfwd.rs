@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use wirdrop_radio::dm::{Dm, rssi_of};
 use wirdrop_radio::radio::{AWDL_BSSID, C2h, mac_str};
+use wirdrop_radio::rtl8822b::{RXERR_MAC_DROP, RXERR_VHT_OK};
 use wirdrop_radio::{Config, Radio, RxFrame, TxFrame, TxRate, UsbId};
 
 macro_rules! log {
@@ -1067,8 +1068,14 @@ impl Relay {
         {
             // 파일 내용만 본 이번 구간: 전송이 있었을 때만 남기고, 구간마다 비웁니다.
             let b = std::mem::replace(&mut *self.bulk.lock().unwrap(), Bulk::EMPTY);
+            // 무선으로 멀쩡히 받고도 MAC이 버린 것 (FIFO가 USB보다 빨리 참).
+            let mac = radio.chip.rx_reports(&[RXERR_MAC_DROP, RXERR_VHT_OK]).unwrap_or_default();
+            let at = |i: usize| mac.get(i).copied().unwrap_or(0);
             if b.frames >= 200 {
                 log!("{}", b.summary());
+            }
+            if at(0) > 0 || b.frames >= 200 {
+                log!("MAC rx report: dropped {} after receiving them | VHT ok {}", at(0), at(1));
             }
         }
         {
