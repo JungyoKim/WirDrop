@@ -89,14 +89,15 @@ pub struct Media {
 
 impl Media {
     /// /Discover에 넣는 JSON. iPhone(iOS 26)이 보내는 꼴에서 Windows가 열지 못하는 것(ProRes, Dolby
-    /// Vision, Live Photo와 편집 묶음)을 뺍니다.
+    /// Vision, Live Photo와 편집 묶음)을 뺍니다. CodecSupport는 iPhone처럼 Codecs 안에 둡니다: 맨
+    /// 위에 두면 iPhone이 HEVC를 받지 못하는 것으로 보고 영상을 H.264로 다시 만들어 보냅니다.
     pub fn capabilities(&self) -> Vec<u8> {
         let mut caps = String::from(r#"{"Version":3"#);
         if self.hevc {
             let level = r#"{"VTMaxDecodeLevel":186,"VTIsHardwareAccelerated":true}"#;
             let hvc1 = format!(r#""VTIsHDRAllowedOnDevice":true,"VTSupportedProfiles":[1,2],"VTPerProfileSupport":{{"1":{level},"2":{level}}}"#);
             caps += &format!(
-                r#","Codecs":{{"hvc1":{{"Profiles":{{{hvc1}}}}}}},"CodecSupport":{{"VTIsHDRAllowedOnDevice":true,"VTCodecSupportDict":{{"hvc1":{{{hvc1}}}}}}}"#
+                r#","Codecs":{{"hvc1":{{"Profiles":{{{hvc1}}}}},"CodecSupport":{{"VTIsHDRAllowedOnDevice":true,"VTCodecSupportDict":{{"hvc1":{{{hvc1}}}}}}}}}"#
             );
         }
         if self.heif {
@@ -121,7 +122,10 @@ mod tests {
         let all = json(Media { hevc: true, heif: true });
         assert_eq!(all["Codecs"]["hvc1"]["Profiles"]["VTSupportedProfiles"], serde_json::json!([1, 2]));
         assert_eq!(all["Codecs"]["hvc1"]["Profiles"]["VTPerProfileSupport"]["2"]["VTMaxDecodeLevel"], 186);
-        assert_eq!(all["CodecSupport"]["VTCodecSupportDict"]["hvc1"]["VTIsHDRAllowedOnDevice"], true);
+        assert_eq!(
+            all["Codecs"]["CodecSupport"]["VTCodecSupportDict"]["hvc1"]["VTIsHDRAllowedOnDevice"],
+            true
+        );
         assert_eq!(all["ContainerFormats"]["public.heif-standard"]["HeifSubtypes"][0], "public.heic");
         let video = json(Media { hevc: true, heif: false });
         assert!(video.get("ContainerFormats").is_none() && video.get("Codecs").is_some());

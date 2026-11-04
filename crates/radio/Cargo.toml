@@ -2,7 +2,7 @@
 name = "wirdrop-radio"
 version = "0.1.0"
 edition = "2024"
-description = "A user-mode driver for the Realtek RTL8822BU/RTL8812BU over WinUSB, for AWDL"
+description = "A user-mode driver for the Realtek RTL8822BU/RTL8812BU and RTL8912AU over WinUSB, for AWDL"
 # Our code is MIT; the parts ported from Linux rtw88 are BSD-3-Clause (see NOTICE.md).
 license = "MIT AND BSD-3-Clause"
 publish = false

@@ -1,28 +1,41 @@
 //! Realtek RTL8912AU (RTL8922A 계열, Wi-Fi 7) USB 어댑터, 예: ipTIME BE6500UA. Linux rtw89에서
 //! BSD-3-Clause로 옮기는 중입니다 (NOTICE.md): 지금은 USB 3 전환, 전원 켜기, eFuse, 펌웨어 내려받기.
 //! 레지스터 주소는 24비트이고, 제조사 요청의 wValue/wIndex로 나뉘어 갑니다 ([Usb::read_wide]).
-use std::cell::Cell;
 use std::io;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::usb::{Usb, UsbId};
 
 mod chan;
+mod dm;
 pub mod fw;
 mod mac;
 mod phy;
 mod rfk;
 pub mod rx;
+mod tx;
+mod txpwr;
 // rtw89의 reg.h에서 생성: 손으로 고치거나 rustfmt로 정렬하지 않습니다 (tools/gen_rtw89.py).
 #[rustfmt::skip]
 mod generated;
 
 pub use chan::{Band, Bw, Chan};
+pub use dm::DigReport;
 /// 레지스터 정의 (시험 도구가 직접 읽을 때).
 pub use generated::regs;
 use generated::regs::*;
 pub use rfk::RfkResult;
+pub use tx::{BACAM_STATIC_NUM, HwRate, TX_DESC_SIZE, TxFrame};
+pub use txpwr::TxPowerTables;
+
+/// Realtek의 RTL8922A 펌웨어 (linux-firmware rtw89/rtw8922a_fw-4.bin, 수정 없이 재배포 가능).
+pub static FIRMWARE: &[u8] = include_bytes!("../../firmware/rtw8922a_fw-4.bin");
+
+/// 이 드라이버로 여는 USB ID (시험한 것: ipTIME BE6500UA, Realtek 기본 ID).
+pub const USB_IDS: &[UsbId] = &[UsbId::RTL8912AU];
 
 /// H2C와 펌웨어 조각 앞의 서술자 (rtw89_rxdesc_short_v2 크기, 첫 dword만 씀).
 const H2C_DESC_SIZE: usize = 24;
@@ -64,6 +77,8 @@ const XTAL_SI_XREF_RF1: u8 = 0x2d;
 const XTAL_SI_XREF_RF2: u8 = 0x2e;
 const XTAL_SI_SRAM_CTRL: u8 = 0xa1;
 const XTAL_SI_SRAM_DIS: u8 = 1 << 1;
+const XTAL_SI_CHIP_ID_L: u8 = 0xfd;
+const XTAL_SI_CHIP_ID_H: u8 = 0xfe;
 const EFUSE_SEC_START: u32 = 0x1580;
 const EFUSE_FV_OFFSET: u32 = 0x17ca;
 
@@ -92,24 +107,67 @@ pub struct Rtl8922a {
     /// eFuse의 RFE 종류(보드 배선)와 크리스털 보정값 ([Rtl8922a::read_efuse_rf]).
     pub rfe: u8,
     pub xtal_k: u8,
-    h2c_seq: Cell<u8>,
+    /// A-die 번호 (rtw89_hal::aid): 펌웨어의 칩 변형별 요소를 고를 때.
+    pub aid: u16,
+    /// 송신 출력 표와 대역별 규제 ([Rtl8922a::set_channel]이 채널마다 씁니다).
+    txpwr: Option<(TxPowerTables, [u8; 3])>,
+    h2c_seq: AtomicU8,
     /// 펌웨어의 BB 이득 표 ([Rtl8922a::phy_init]에서 읽음).
     gain: Box<phy::BbGain>,
     /// RF 보정 결과를 담는 표의 채널들 (rtw89_rfk_mcc_info_data; [Rtl8922a::set_channel]).
-    rfk_tbl: Cell<[Option<Chan>; chan::RFK_TABLES]>,
+    rfk_tbl: Mutex<[Option<Chan>; chan::RFK_TABLES]>,
 }
 
 impl Rtl8922a {
+    /// 어댑터를 열고 채널 c에 올려 RF 보정까지 마칩니다 (rtw89_core_start, 채널 설정, RF 보정).
+    /// country(ISO 3166 두 글자)의 규제로 송신 출력을 정하고, 모르면 세계 공통 한도를 씁니다.
+    pub fn start(c: &Chan, country: Option<[u8; 2]>) -> io::Result<(Rtl8922a, Vec<RfkResult>)> {
+        Self::start_with(UsbId::RTL8912AU, c, country)
+    }
+
+    /// [Rtl8922a::start]와 같지만 USB ID를 고릅니다.
+    pub fn start_with(id: UsbId, c: &Chan, country: Option<[u8; 2]>) -> io::Result<(Rtl8922a, Vec<RfkResult>)> {
+        let mut chip = Rtl8922a::open_with(id)?;
+        chip.power_on()?;
+        chip.download_firmware(FIRMWARE)?;
+        chip.mac_init()?;
+        chip.read_efuse_rf()?;
+        chip.aid = chip.xtal_si_read(XTAL_SI_CHIP_ID_L)? as u16 | (chip.xtal_si_read(XTAL_SI_CHIP_ID_H)? as u16) << 8;
+        let tables = TxPowerTables::load(FIRMWARE, chip.aid, chip.rfe)?;
+        let regd = tables.regd_of(country);
+        chip.txpwr = Some((tables, regd));
+        chip.phy_init(FIRMWARE)?;
+        chip.dm_init(FIRMWARE)?;
+        chip.set_channel(c)?;
+        let rfk = {
+            let mut reader = chip.usb.reader(4, 32 * 1024)?;
+            chip.calibrate(&mut reader, c, true)?
+        };
+        Ok((chip, rfk))
+    }
+
     /// 어댑터를 엽니다. USB 2로 붙어 있으면 USB 3으로 다시 연결하게 하고 기다립니다
     /// (rtw89_usb_switch_mode_be; USB 2 포트면 한 번 시도한 표시가 남아 다시 하지 않습니다).
     pub fn open() -> io::Result<Self> {
-        let mut usb = Usb::open(UsbId::RTL8912AU)?;
+        Self::open_with(UsbId::RTL8912AU)
+    }
+
+    /// [Rtl8922a::open]과 같지만 USB ID를 고릅니다. 막 꽂은 어댑터는 WinUSB가 잡기 전에 목록에 나올
+    /// 수 있어 3초까지 기다립니다.
+    pub fn open_with(id: UsbId) -> io::Result<Self> {
+        let t0 = Instant::now();
+        let mut usb = loop {
+            match Usb::open(id) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound && t0.elapsed() < Duration::from_secs(3) => sleep(Duration::from_millis(100)),
+                r => break r?,
+            }
+        };
         if usb.max_packet < 1024 && Self::switch_to_usb3(&usb)? {
             drop(usb);
             let t = Instant::now();
             sleep(Duration::from_millis(1500));
             usb = loop {
-                match Usb::open(UsbId::RTL8912AU) {
+                match Usb::open(id) {
                     Ok(u) => break u,
                     Err(_) if t.elapsed() < Duration::from_secs(15) => sleep(Duration::from_millis(300)),
                     Err(e) => return Err(e),
@@ -126,9 +184,11 @@ impl Rtl8922a {
             secure: None,
             rfe: 0,
             xtal_k: 0,
-            h2c_seq: Cell::new(0),
+            aid: 0,
+            txpwr: None,
+            h2c_seq: AtomicU8::new(0),
             gain: Box::default(),
-            rfk_tbl: Cell::new([None; chan::RFK_TABLES]),
+            rfk_tbl: Mutex::new([None; chan::RFK_TABLES]),
         };
         chip.cv = get(chip.r32(R_AX_SYS_CFG1)?, B_AX_CHIP_VER_MASK) as u8;
         Ok(chip)
@@ -227,6 +287,18 @@ impl Rtl8922a {
         Ok(get(v, B_BE_WL_XTAL_SI_DATA_MASK) as u8)
     }
 
+    /// 크리스털 용량 조정값 (XTAL_SI_XTAL_SC_XI, _XO): 주파수 오차를 맞출 때 rtw89와 공식 드라이버가 둘을
+    /// 같은 값으로 씁니다.
+    fn xtal_cap(&self) -> io::Result<(u8, u8)> {
+        Ok((self.xtal_si_read(0x04)?, self.xtal_si_read(0x05)?))
+    }
+
+    /// [Rtl8922a::xtal_cap]을 바꿉니다 (공식 드라이버처럼 XO 다음 XI).
+    fn set_xtal_cap(&self, cap: u8) -> io::Result<()> {
+        self.xtal_si_write(0x05, cap, 0xff)?;
+        self.xtal_si_write(0x04, cap, 0xff)
+    }
+
     /// 켜기 전에 칩을 꺼진 상태로 맞춥니다 (rtw89_mac_reset_pwr_state_be).
     fn reset_pwr_state(&self) -> io::Result<()> {
         let v = (self.r32(R_BE_SYSON_FSM_MON)? & WLAN_FSM_MASK) | WLAN_FSM_SET;
@@ -268,6 +340,11 @@ impl Rtl8922a {
             self.clr32(R_AX_SYS_STATUS1, B_AX_AUTO_WLPON)?;
             self.clr32(R_AX_GPIO_MUXCFG, B_AX_BOOT_MODE)?;
             self.clr32(R_AX_RSV_CTRL, B_AX_R_DIS_PRST)?;
+        }
+        // 앞 세션이 칩을 켜 둔 채 끝났으면 아날로그와 RF까지 모두 끄고 다시 켭니다 (rtw89_mac_pwr_on이
+        // 이미 켜진 칩에 하는 것).
+        if get(self.r32(R_BE_IC_PWR_STATE)?, B_BE_WLMAC_PWR_STE_MASK) == MAC_AX_MAC_ON {
+            self.pwr_off()?;
         }
         self.reset_pwr_state()?;
 
@@ -444,14 +521,13 @@ impl Rtl8922a {
     /// H2C 명령 하나 (rtw89_h2c_pkt_set_hdr): 분류, 묶음, 기능, 받음/끝남 응답 요청.
     pub fn h2c(&self, cat: u32, class: u32, func: u32, rack: bool, dack: bool, payload: &[u8]) -> io::Result<()> {
         let len = payload.len();
-        let seq = self.h2c_seq.get();
+        let seq = self.h2c_seq.fetch_add(1, Ordering::Relaxed);
         let hdr0 = cat | (class << 2) | (func << 8) | ((seq as u32) << 24);
         let hdr1 = ((len + H2C_HEADER_LEN) as u32 & 0x3fff) | ((rack as u32) << 14) | ((dack as u32) << 15);
         let mut pkt = Vec::with_capacity(H2C_HEADER_LEN + len);
         pkt.extend_from_slice(&hdr0.to_le_bytes());
         pkt.extend_from_slice(&hdr1.to_le_bytes());
         pkt.extend_from_slice(payload);
-        self.h2c_seq.set(seq.wrapping_add(1));
         self.h2c_tx(&pkt, false)
     }
 
@@ -539,7 +615,7 @@ impl Rtl8922a {
         // 머리말 (H2C, 머리말 있음)
         let len = img.header.len();
         let mut pkt = Vec::with_capacity(H2C_HEADER_LEN + len);
-        let hdr0 = H2C_CAT_MAC | (H2C_CL_MAC_FWDL << 2) | (H2C_FUNC_MAC_FWHDR_DL << 8) | ((self.h2c_seq.get() as u32) << 24);
+        let hdr0 = H2C_CAT_MAC | (H2C_CL_MAC_FWDL << 2) | (H2C_FUNC_MAC_FWHDR_DL << 8) | ((self.h2c_seq.load(Ordering::Relaxed) as u32) << 24);
         let hdr1 = (len + H2C_HEADER_LEN) as u32 & 0x3fff;
         pkt.extend_from_slice(&hdr0.to_le_bytes());
         pkt.extend_from_slice(&hdr1.to_le_bytes());
@@ -619,11 +695,20 @@ impl Rtl8922a {
         self.w32_mask(R_BE_FW_AUTO_CAL_DELAY, B_BE_WCPU_FW_DELAY_COUNT_MASK, 0)?;
 
         let mut last = Ok(());
-        for _ in 0..5 {
+        for attempt in 0..5 {
             last = self.try_download(normal, bbmcu);
             if last.is_ok() {
+                tracing::debug!(
+                    "firmware {}.{}.{}.{} in {} attempt(s)",
+                    version[0],
+                    version[1],
+                    version[2],
+                    version[3],
+                    attempt + 1
+                );
                 return Ok(version);
             }
+            tracing::warn!("firmware download attempt {} failed: {:?}", attempt + 1, last.as_ref().err());
         }
         last.map(|_| version)
     }
@@ -667,7 +752,7 @@ impl Rtl8922a {
 
         self.download_suit(normal, true, B_BE_WLANCPU_FWDL_EN, "WLAN CPU firmware")?;
         self.download_suit(bbmcu, false, B_BE_BBMCU0_FWDL_EN, "BB MCU firmware")?;
-        self.h2c_seq.set(0);
+        self.h2c_seq.store(0, Ordering::Relaxed);
         sleep(Duration::from_millis(5));
         self.fw_check_ready(None, "firmware start")
     }
@@ -705,5 +790,41 @@ impl Rtl8922a {
         self.poll(R_AX_WDE_INI_STATUS, 50, "WDE ready", |v| v & WDE_MGN_INI_RDY == WDE_MGN_INI_RDY)?;
         self.poll(R_AX_PLE_INI_STATUS, 50, "PLE ready", |v| v & PLE_MGN_INI_RDY == PLE_MGN_INI_RDY)?;
         Ok(())
+    }
+}
+
+impl Rtl8922a {
+    /// 전원 끄기 (rtw8922a_pwr_off_func의 USB 경로): 아날로그와 RF 전원, BB 리셋, 그리고 MAC.
+    pub(crate) fn pwr_off(&self) -> io::Result<()> {
+        for (offset, val, mask) in [
+            (XTAL_SI_ANAPAR_WL, 0x10, 0x10),
+            (XTAL_SI_ANAPAR_WL, 0, 0x08),
+            (XTAL_SI_ANAPAR_WL, 0, 0x04),
+            (XTAL_SI_WL_RFC_S0, 0xc6, 0xff),
+            (XTAL_SI_WL_RFC_S1, 0xc6, 0xff),
+            (XTAL_SI_ANAPAR_WL, 0x80, 0x80),
+            (XTAL_SI_ANAPAR_WL, 0, 0x02),
+            (XTAL_SI_ANAPAR_WL, 0, 0x01),
+            (XTAL_SI_PLL, 0x02, 0xff),
+            (XTAL_SI_PLL, 0x00, 0xff),
+        ] {
+            self.xtal_si_write(offset, val, mask)?;
+        }
+        self.set32(R_BE_FEN_RST_ENABLE, B_BE_R_SYM_ISO_ADDA_P02PP | B_BE_R_SYM_ISO_ADDA_P12PP)?;
+        self.clr8(R_BE_ANAPAR_POW_MAC, B_BE_POW_PC_LDO_PORT0 | B_BE_POW_PC_LDO_PORT1)?;
+        self.set32(R_BE_SYS_PW_CTRL, B_BE_EN_WLON)?;
+        self.clr8(R_BE_FEN_RST_ENABLE, B_BE_FEN_BB_IP_RSTN | B_BE_FEN_BBPLAT_RSTB)?;
+        self.clr32(R_BE_SYS_ADIE_PAD_PWR_CTRL, B_BE_SYM_PADPDN_WL_RFC0_1P3)?;
+        self.xtal_si_write(XTAL_SI_ANAPAR_WL, 0, 0x20)?;
+        self.clr32(R_BE_SYS_ADIE_PAD_PWR_CTRL, B_BE_SYM_PADPDN_WL_RFC1_1P3)?;
+        self.xtal_si_write(XTAL_SI_ANAPAR_WL, 0, 0x40)?;
+        self.clr32(R_BE_HCI_OPT_CTRL, B_BE_HCI_WLAN_IO_EN)?;
+        self.poll(R_BE_HCI_OPT_CTRL, 3000, "WLAN IO off", |v| v & B_BE_HCI_WLAN_IO_ST == 0)?;
+        self.set32(R_BE_SYS_PW_CTRL, B_BE_APFM_OFFMAC)?;
+        self.poll(R_BE_SYS_PW_CTRL, 3000, "MAC off", |v| v & B_BE_APFM_OFFMAC == 0)?;
+        self.clr32(R_BE_SYS_PW_CTRL, B_BE_SOP_EASWR)?;
+        self.clr32(R_BE_SYS_PW_CTRL, B_BE_XTAL_OFF_A_DIE)?;
+        let v = self.r32(R_BE_SYS_PW_CTRL)?;
+        self.w32(R_BE_SYS_PW_CTRL, (v | B_BE_AFSM_WLSUS_EN) & !B_BE_AFSM_PCIE_SUS_EN)
     }
 }

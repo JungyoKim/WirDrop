@@ -65,8 +65,9 @@ Mac. Optional, and your password is never stored.
 ## What you need
 
 - A Windows 11 PC (64-bit) with Bluetooth
-- A **TP-Link Archer T3U Nano** USB Wi-Fi adapter. It becomes WirDrop's AirDrop radio while it's
-  plugged in, so your usual Wi-Fi keeps the internet.
+- A USB Wi-Fi adapter: an **ipTIME BE6500UA** or a **TP-Link Archer T3U Nano**. It becomes
+  WirDrop's AirDrop radio while it's plugged in, so your usual Wi-Fi keeps the internet. You don't
+  need the adapter's own driver.
 - An iPhone or iPad with AirDrop
 
 ## Get started
@@ -74,7 +75,7 @@ Mac. Optional, and your password is never stored.
 1. Download **WirDrop-Setup** from [Releases](https://github.com/JungyoKim/WirDrop/releases/latest)
    and run it. It asks for administrator permission once. The app isn't code-signed yet, so
    SmartScreen may warn you first: choose **More info**, then **Run anyway**.
-2. Plug in the T3U Nano. The tray icon turns blue when WirDrop is ready.
+2. Plug in the adapter. The tray icon turns blue when WirDrop is ready.
 3. On the iPhone, tap **Share**, then **AirDrop**, and pick this PC. To send the other way,
    right-click a file on the PC and choose **AirDrop**.
 
@@ -85,7 +86,7 @@ it's running, and the new one while it installs.
 <summary><b>Why does it need a USB adapter?</b></summary>
 
 AirDrop runs over AWDL, Apple's own Wi-Fi link, which Windows Wi-Fi drivers can't speak. WirDrop
-drives the T3U Nano itself, from an ordinary app over Windows' built-in WinUSB driver. No kernel
+drives the adapter itself, from an ordinary app over Windows' built-in WinUSB driver. No kernel
 driver is installed and Secure Boot stays on. Uninstalling WirDrop gives the adapter back to
 Windows.
 </details>
@@ -93,8 +94,9 @@ Windows.
 <details>
 <summary><b>How fast is it?</b></summary>
 
-An 80 MB video takes about 3 seconds either way (22 to 26 MB/s) with the iPhone a metre away. See
-[How it works](docs/how-it-works.md#speed).
+With the iPhone a metre away, the BE6500UA moves a 687 MB video to the PC in about 22 seconds
+(31 MB/s) and back in about 28 seconds (24 MB/s). The T3U Nano sends an 80 MB video in about
+3 seconds either way (22 to 26 MB/s). See [How it works](docs/how-it-works.md#speed).
 </details>
 
 <details>

@@ -1,5 +1,5 @@
 """Generates Rust sources from Linux rtw89 (GPL-2.0 OR BSD-3-Clause; used here under BSD-3-Clause):
-register and field definitions (reg.h, mac.h, txrx.h, fw.h, phy.h, efuse.h, usb.h) for the RTL8912AU / RTL8922AU
+register and field definitions (reg.h, mac.h, txrx.h, fw.h, phy.h, efuse.h, usb.h, cam.h) for the RTL8912AU / RTL8922AU
 port. Usage: python gen_rtw89.py <rtw89 dir> <out dir>"""
 import re
 import sys
@@ -60,7 +60,8 @@ def gen_regs(srcs, out):
 def main():
     src, out = Path(sys.argv[1]), Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
-    print("regs", gen_regs([src / n for n in ("reg.h", "mac.h", "txrx.h", "fw.h", "phy.h", "efuse.h", "usb.h")], out / "regs.rs"))
+    names = ("reg.h", "mac.h", "txrx.h", "fw.h", "phy.h", "efuse.h", "usb.h", "cam.h")
+    print("regs", gen_regs([src / n for n in names], out / "regs.rs"))
 
 
 if __name__ == "__main__":

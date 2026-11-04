@@ -564,8 +564,8 @@ fn gallery(island: &Island, picture: Option<PathBuf>) {
                 Glyph::NoWifi,
                 t("USB 어댑터를 꽂아 주세요", "Plug in the USB adapter").into(),
                 t(
-                    "TP-Link Archer T3U Nano를 꽂으면 바로 시작합니다.",
-                    "WirDrop starts as soon as a TP-Link Archer T3U Nano is in.",
+                    "T3U Nano나 BE6500UA를 꽂으면 바로 시작합니다.",
+                    "WirDrop starts as soon as a T3U Nano or BE6500UA is in.",
                 )
                 .into(),
                 &[],

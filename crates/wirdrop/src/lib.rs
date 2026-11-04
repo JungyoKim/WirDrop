@@ -2,7 +2,8 @@
 //!
 //! 아래에서부터 쌓인 부품:
 //!
-//! - [usbfwd]: WinUSB에 묶인 Realtek USB 어댑터(TP-Link Archer T3U Nano, RTL8812BU)를 사용자 모드의
+//! - [usbfwd]: WinUSB에 묶인 Realtek USB 어댑터(TP-Link Archer T3U Nano의 RTL8812BU, ipTIME
+//!   BE6500UA의 RTL8912AU)를 사용자 모드의
 //!   usbfwd 자식 프로세스가 구동합니다. ACK와 Block Ack은 하드웨어가 보내고, 프레임은 루프백 UDP로
 //!   오갑니다 ([air]).
 //! - [link]: owly-awdl의 AWDL 노드가 자기 스레드에서 그 무선과 [netif](Wintun 어댑터 awdl0) 사이를

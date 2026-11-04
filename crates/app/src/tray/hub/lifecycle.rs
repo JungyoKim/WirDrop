@@ -162,6 +162,8 @@ impl Hub {
             return;
         }
         self.devices_dirty = None;
+        // 막 꽂은 BE6500UA는 가상 CD로 먼저 뜹니다: 꺼내면 곧 무선 랜으로 다시 잡혀 다음 확인에서 보입니다.
+        crate::driver::eject_driver_cd();
         let adapter = crate::win::find_adapter();
         if adapter == self.adapter {
             return;

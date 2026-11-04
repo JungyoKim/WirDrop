@@ -12,19 +12,23 @@ AWDL, so WirDrop brings its own radio.
 
 ```mermaid
 flowchart LR
-    phone[iPhone] <-- "AWDL, 5 GHz channel 149" --> nano[T3U Nano]
-    nano <-- "USB (WinUSB)" --> usbfwd["usbfwd (wirdrop-radio)<br/>RTL8822BU driver: ACK and Block Ack in hardware,<br/>A-MPDU, RX reordering, TCP ACK pacing"]
+    phone[iPhone] <-- "AWDL, 5 GHz channel 149" --> nano["BE6500UA or T3U Nano"]
+    nano <-- "USB (WinUSB)" --> usbfwd["usbfwd (wirdrop-radio)<br/>RTL8912AU and RTL8822BU driver: ACK and Block Ack<br/>in hardware, A-MPDU, RX reordering, TCP ACK pacing"]
     usbfwd <-- "loopback UDP" --> node["owly-awdl<br/>AWDL node"]
     node <-- "IPv6" --> awdl0["Wintun adapter awdl0"]
     awdl0 <--> tcp["Windows TCP/IP"]
     tcp <--> app["owly-airdrop<br/>mDNS, TLS, /Discover /Ask /Upload"]
 ```
 
-- **usbfwd** (`crates/radio`) drives the TP-Link Archer T3U Nano (Realtek RTL8812BU, USB
-  `2357:012E`) with wirdrop-radio, WirDrop's user-mode RTL8822BU/RTL8812BU driver. It talks to
-  Windows' built-in WinUSB driver, so nothing runs in the kernel and Secure Boot stays on. The chip
-  bring-up is ported from Linux [rtw88](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw88)
-  under its BSD-3-Clause license, with Realtek's redistributable firmware.
+- **usbfwd** (`crates/radio`) drives the adapter with wirdrop-radio, WirDrop's user-mode driver
+  for two Realtek chips: the RTL8912AU in the ipTIME BE6500UA (USB `0BDA:8912`) and the RTL8812BU
+  in the TP-Link Archer T3U Nano (USB `2357:012E`). It talks to Windows' built-in WinUSB driver,
+  so nothing runs in the kernel and Secure Boot stays on. The chip bring-up is ported from Linux
+  [rtw89](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw89) and
+  [rtw88](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw88) under
+  their BSD-3-Clause license, with Realtek's redistributable firmware. The BE6500UA first shows up
+  as a virtual CD with Realtek's Windows driver on it; WirDrop ejects it so the adapter comes back
+  as Wi-Fi. If both adapters are plugged in, WirDrop uses the BE6500UA.
 - **wirdrop** (`crates/wirdrop`) runs [owly](https://github.com/t4t5/owly)'s AWDL node between that
   radio and a [Wintun](https://www.wintun.net) adapter named awdl0, and owly's AirDrop sender and
   receiver over the resulting IPv6 link.
@@ -62,7 +66,14 @@ lists the PC once: as one of its own devices for its owner, by name for everyone
 
 ## Speed
 
-An 80 MB (79.75 MB) video between the PC and an iPhone a metre away:
+A 687 MB video between the PC and an iPhone a metre away, with the BE6500UA:
+
+| Direction | Time |
+|---|---|
+| iPhone → PC | 22.3 s (30.8 MB/s) |
+| PC → iPhone | 28.2 s after the iPhone accepts (24.3 MB/s) |
+
+An 80 MB (79.75 MB) video with the T3U Nano:
 
 | Direction | WirDrop | First working version |
 |---|---|---|
@@ -73,6 +84,6 @@ What limits it now is the iPhone, which spends only 65 to 77% of a transfer on t
 
 ## Known limits
 
-- One adapter model, on 5 GHz channel 149.
+- Two adapter models (BE6500UA and T3U Nano), on 5 GHz channel 149.
 - Speed depends on how long the iPhone stays on channel 149, which the iPhone decides.
 - Sometimes the iPhone's share sheet needs reopening before the PC appears.

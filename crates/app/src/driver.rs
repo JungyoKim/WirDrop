@@ -5,8 +5,8 @@
 //! 클래스를 USB 장치로 바꾸고, winusb.inf의 "WinUsb Device"를 골라 설치하고, usbfwd가 장치를 여는
 //! 장치 인터페이스를 하드웨어 키에 씁니다 (winusb.inf는 장치에 맡기는데 이 장치는 알려 주지
 //! 않습니다). WirDrop의 드라이버 패키지도 인증서도 없습니다. 끄면 어댑터를 Windows의 선택(Realtek
-//! Wi-Fi 드라이버)으로 돌려줍니다. [needs_binding] 말고는 모두 관리자 권한이 필요합니다
-//! (WirDrop.exe --setup --driver on|off).
+//! Wi-Fi 드라이버)으로 돌려줍니다. [needs_binding]과 [eject_driver_cd] 말고는 모두 관리자 권한이
+//! 필요합니다 (WirDrop.exe --setup --driver on|off).
 use std::io;
 
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -125,6 +125,85 @@ fn bound(set: HDEVINFO, data: &SP_DEVINFO_DATA) -> bool {
 /// 지원 어댑터가 꽂혀 있지만 아직 WinUSB가 아닙니다. 권한이 필요 없습니다.
 pub fn needs_binding() -> bool {
     adapters().is_ok_and(|a| a.devices.iter().any(|(data, _)| !bound(a.set, data)))
+}
+
+/// RTL8912AU 어댑터(ipTIME BE6500UA)는 꽂을 때마다 먼저 Realtek 드라이버 설치 파일을 담은 가상
+/// CD(0bda:1a2b, "RTK Driver Storage")로 나타나고, CD를 꺼내야 무선 랜(0bda:8912)으로 바뀝니다.
+/// 그런 CD를 모두 꺼내고 꺼낸 수를 돌려줍니다. 드라이브 문자가 붙기 전에도 찾도록 CD-ROM 장치
+/// 인터페이스로 찾고, 다른 CD 드라이브는 건드리지 않습니다. 권한이 필요 없습니다.
+pub fn eject_driver_cd() -> usize {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_DEVICEINTERFACE, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiEnumDeviceInterfaces,
+        SetupDiGetDeviceInterfaceDetailW,
+    };
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_CDROM, IOCTL_STORAGE_EJECT_MEDIA};
+    let mut ejected = 0;
+    // SAFETY: 여기서 만든 목록에 대한 SetupAPI 호출, 지역 버퍼, 연 핸들은 닫습니다.
+    unsafe {
+        let Ok(set) = SetupDiGetClassDevsW(
+            Some(&GUID_DEVINTERFACE_CDROM),
+            PCWSTR::null(),
+            None,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        ) else {
+            return 0;
+        };
+        for i in 0.. {
+            let mut iface = SP_DEVICE_INTERFACE_DATA {
+                cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+                ..Default::default()
+            };
+            if SetupDiEnumDeviceInterfaces(set, None, &GUID_DEVINTERFACE_CDROM, i, &mut iface).is_err() {
+                break;
+            }
+            let mut buf = vec![0u64; 256];
+            let detail = buf.as_mut_ptr().cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
+            (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+            let mut data = SP_DEVINFO_DATA {
+                cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
+                ..Default::default()
+            };
+            if SetupDiGetDeviceInterfaceDetailW(set, &iface, Some(detail), (buf.len() * 8) as u32, None, Some(&mut data)).is_err() {
+                continue;
+            }
+            let mut id = [0u16; 512];
+            if SetupDiGetDeviceInstanceIdW(set, &data, Some(&mut id), None).is_err() {
+                continue;
+            }
+            let id = String::from_utf16_lossy(&id[..id.iter().position(|&c| c == 0).unwrap_or(id.len())]).to_ascii_uppercase();
+            if !id.contains("VEN_RTK&PROD_DRIVER_STORAGE") {
+                continue;
+            }
+            let path = PCWSTR((*detail).DevicePath.as_ptr());
+            let file = CreateFileW(
+                path,
+                GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            );
+            let result = file.and_then(|h| {
+                let mut returned = 0u32;
+                let r = DeviceIoControl(h, IOCTL_STORAGE_EJECT_MEDIA, None, 0, None, 0, Some(&mut returned), None);
+                let _ = CloseHandle(h);
+                r
+            });
+            match result {
+                Ok(()) => {
+                    tracing::info!("driver: ejected the adapter's driver CD ({id}) so it comes back as Wi-Fi");
+                    ejected += 1;
+                }
+                Err(e) => tracing::warn!("driver: can't eject the adapter's driver CD ({id}): {e}"),
+            }
+        }
+        let _ = SetupDiDestroyDeviceInfoList(set);
+    }
+    ejected
 }
 
 /// 어댑터마다 WirDrop이 무엇을 할지 아무것도 바꾸지 않고 적습니다 (setup.log).

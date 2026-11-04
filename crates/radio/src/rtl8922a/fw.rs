@@ -87,6 +87,8 @@ pub fn suit(file: &[u8], kind: u8, cv: u8) -> io::Result<&[u8]> {
 pub struct Element<'a> {
     pub id: u32,
     pub ver: [u8; 4],
+    /// 이 요소가 맞는 A-die (0이면 모두; rtw89_hal::aid).
+    pub aid: u16,
     pub head: [u8; 8],
     pub body: &'a [u8],
 }
@@ -103,6 +105,7 @@ pub fn elements(file: &[u8]) -> io::Result<Vec<Element<'_>>> {
         out.push(Element {
             id: le32(file, o),
             ver: file[o + 8..o + 12].try_into().unwrap(),
+            aid: u16::from_le_bytes([file[o + 12], file[o + 13]]),
             head: file[o + 24..o + 32].try_into().unwrap(),
             body: &file[o + ELEMENT_HDR..o + ELEMENT_HDR + size],
         });

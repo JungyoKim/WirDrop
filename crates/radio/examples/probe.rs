@@ -1,21 +1,34 @@
 //! 어댑터를 올리고 잠시 듣는 것을 셉니다.
-//! cargo run -p wirdrop-radio --example probe -- [seconds] [mac]
+//! cargo run -p wirdrop-radio --example probe -- [seconds] [mac] [channel] [bw]
+//! 꽂혀 있으면 RTL8912AU를, 아니면 T3U Nano를 씁니다.
 use std::time::{Duration, Instant};
 
 use wirdrop_radio::radio::{AWDL_BSSID, mac_str};
-use wirdrop_radio::{Config, Radio};
+use wirdrop_radio::{Config, Radio, Usb, UsbId};
 
 fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).init();
     let args: Vec<String> = std::env::args().collect();
     let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+    let usb = if Usb::present(UsbId::RTL8912AU) {
+        UsbId::RTL8912AU
+    } else {
+        UsbId::T3U_NANO
+    };
     let mut cfg = Config {
+        usb,
         tx_power: Some(52),
         ..Config::default()
     };
     if let Some(m) = args.get(2) {
         let b: Vec<u8> = m.split(':').filter_map(|x| u8::from_str_radix(x, 16).ok()).collect();
         cfg.mac.copy_from_slice(&b[..6]);
+    }
+    if let Some(ch) = args.get(3).and_then(|s| s.parse().ok()) {
+        cfg.channel = ch;
+    }
+    if let Some(bw) = args.get(4).and_then(|s| s.parse().ok()) {
+        cfg.bw_mhz = bw;
     }
     let radio = Radio::open(cfg)?;
     let mac = radio.cfg.mac;
@@ -29,7 +42,7 @@ fn main() -> std::io::Result<()> {
     while Instant::now() < end {
         rx.next(|buf| {
             transfers += 1;
-            Radio::parse(buf, |f| {
+            radio.parse(buf, |f| {
                 all += 1;
                 if f.crc_err {
                     bad += 1;
@@ -68,7 +81,7 @@ fn main() -> std::io::Result<()> {
                 types[0],
                 types[1],
                 types[2],
-                radio.chip.false_alarms().unwrap_or(0)
+                radio.rtw88().and_then(|c| c.false_alarms().ok()).unwrap_or(0)
             );
         }
     }

@@ -6,7 +6,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use super::generated::regs::*;
-use super::phy::{INV_RF_DATA, RFREG_MASK};
+use super::phy::{INV_RF_DATA, RFREG_MASK, phy1};
 use super::{CHIP_CAV, Rtl8922a, put};
 
 /// RF 보정 결과를 채널별로 담아 두는 표의 수 (__RTW89_RFK_CHS_NR_V1).
@@ -71,6 +71,29 @@ impl Chan {
     /// 20 MHz 채널.
     pub fn narrow(band: Band, ch: u8) -> Self {
         Chan::new(band, ch, ch, Bw::B20)
+    }
+
+    /// 2.4/5 GHz 주 채널 primary와 폭으로 채널 (중심은 그 폭의 표준 묶음에서).
+    pub fn around(primary: u8, bw: Bw) -> Self {
+        let band = if primary <= 14 { Band::G2 } else { Band::G5 };
+        if band == Band::G2 || bw == Bw::B20 {
+            return Chan::new(band, primary, primary, Bw::B20);
+        }
+        // 5 GHz 묶음의 첫 채널들 (40/80/160 MHz).
+        let starts: &[u8] = match bw {
+            Bw::B40 => &[36, 44, 52, 60, 100, 108, 116, 124, 132, 140, 149, 157, 165, 173],
+            Bw::B80 => &[36, 52, 100, 116, 132, 149, 165],
+            _ => &[36, 100, 149],
+        };
+        let span = 4 * match bw {
+            Bw::B40 => 2,
+            Bw::B80 => 4,
+            _ => 8,
+        };
+        match starts.iter().find(|&&s| primary >= s && primary < s + span) {
+            Some(&s) => Chan::new(band, s + (span - 4) / 2, primary, bw),
+            None => Chan::new(band, primary, primary, Bw::B20),
+        }
     }
 
     /// 중심 주파수 (MHz).
@@ -244,6 +267,8 @@ impl Rtl8922a {
         // rtw89_btc_ntfy_init: rtw8922a_btc_init_cfg, 그리고 블루투스가 없으니 Wi-Fi 전용 안테나.
         self.btc_init_cfg()?;
         self.btc_wl_only()?;
+        self.cfo_init()?;
+        self.bb_wrap_init()?;
         // rtw8922a_rfk_hw_init: rfk_mlo_ctrl, 그리고 PLL
         self.set_syn_a_only()?;
         self.chlk_reload(&BOOT_CHAN)?;
@@ -258,6 +283,69 @@ impl Rtl8922a {
         self.cfg_phy_rpt(true)
     }
 
+    /// rtw89_phy_cfo_init과 rtw89_dcfo_comp_init: 공장에서 eFuse에 적어 둔 크리스털 보정값으로 주파수를
+    /// 맞추고, 디지털 CFO 보정을 켭니다. 이 칩은 전원이 들어오면 보정값 대신 0x40으로 돌아서 (이
+    /// 어댑터의 eFuse 값은 0x59) 주파수가 정확한 iPhone과는 수십 kHz가 어긋나고, 그러면 칩이 상대의
+    /// ACK부터 알아듣지 못해 같은 프레임을 한도까지 다시 보냅니다.
+    fn cfo_init(&self) -> io::Result<()> {
+        let cap = self.xtal_k & B_AX_XTAL_SC_MASK as u8;
+        // 비어 있는 eFuse(0xff)는 기본값 그대로 둡니다.
+        if self.xtal_k != 0xff {
+            self.set_xtal_cap(cap)?;
+        }
+        for a in [R_DCFO_OPT_BE, phy1(R_DCFO_OPT_BE)] {
+            self.pw32_mask(a, B_DCFO_OPT_EN_BE, 1)?;
+        }
+        for a in [R_DCFO_WEIGHT_BE, phy1(R_DCFO_WEIGHT_BE)] {
+            self.pw32_mask(a, B_DCFO_WEIGHT_MSK_BE, 8)?;
+        }
+        tracing::debug!("crystal cap {:02x?} (eFuse {:02x})", self.xtal_cap()?, self.xtal_k);
+        Ok(())
+    }
+
+    /// rtw89_phy_bb_wrap_init_be (MAC 0): MACID마다의 송신 경로와 출력 한도 표를 비우고, 송신 출력
+    /// 표와 강제 설정을 처음 값으로 둡니다. 이 표들은 전원을 켤 때 아무 값이나 들어 있어서, 비우지
+    /// 않으면 MACID마다의 송신 출력이 올릴 때마다 달라집니다.
+    fn bb_wrap_init(&self) -> io::Result<()> {
+        const MACIDS: u32 = 32;
+        for i in 0..MACIDS {
+            self.w32(R_BE_PWR_MACID_PATH_BASE + 4 * i, 0)?;
+        }
+        for i in 0..MACIDS {
+            self.w32(R_BE_PWR_MACID_LMT_BASE + 4 * i, 0)?;
+        }
+        // rtw89_phy_bb_wrap_tpu_set_all
+        self.w32_mask(R_BE_PWR_FTM_SS, B_BE_PWR_BY_RATE_DBW_ON, 0x3)?;
+        for range in [
+            R_BE_PWR_BY_RATE..=R_BE_PWR_BY_RATE_END,
+            R_BE_PWR_RULMT_START..=R_BE_PWR_RULMT_END,
+            R_BE_PWR_RATE_OFST_CTRL..=R_BE_PWR_RATE_OFST_END,
+        ] {
+            for a in range.step_by(4) {
+                self.w32(a, 0)?;
+            }
+        }
+        self.w32_mask(R_BE_PWR_REF_CTRL, B_BE_PWR_OFST_LMT_DB, 0)?;
+        self.w32_mask(R_BE_PWR_OFST_LMTBF, B_BE_PWR_OFST_LMTBF_DB, 0)?;
+        self.w32_mask(R_BE_PWR_RATE_CTRL, B_BE_PWR_OFST_BYRATE_DB, 0)?;
+        self.w32_mask(R_BE_PWR_OFST_RULMT, B_BE_PWR_OFST_RULMT_DB, 0)?;
+        self.w32_mask(R_BE_PWR_OFST_SW, B_BE_PWR_OFST_SW_DB, 0)?;
+        // rtw89_phy_bb_wrap_force_cr_init
+        self.w32_mask(R_BE_PWR_FORCE_LMT, B_BE_PWR_FORCE_LMT_ON, 0)?;
+        self.w32_mask(R_BE_PWR_RATE_CTRL, B_BE_FORCE_PWR_BY_RATE_EN, 0)?;
+        self.w32_mask(R_BE_PWR_OFST_RULMT, B_BE_PWR_FORCE_RU_ENON, 0)?;
+        self.w32_mask(R_BE_PWR_OFST_RULMT, B_BE_PWR_FORCE_RU_ON, 0)?;
+        self.w32_mask(R_BE_PWR_FORCE_MACID, B_BE_PWR_FORCE_MACID_ALL, 0)?;
+        self.w32_mask(R_BE_PWR_COEX_CTRL, B_BE_PWR_FORCE_COEX_ON, 0)?;
+        self.w32_mask(R_BE_PWR_BOOST, B_BE_PWR_FORCE_RATE_ON, 0)?;
+        // rtw89_phy_bb_wrap_ftm_init
+        self.w32(R_BE_PWR_FTM, 0x00e4_e431)?;
+        self.w32_mask(R_BE_PWR_FTM_SS, 0x7, 0)?;
+        // rtw89_phy_bb_wrap_ul_pwr (8922A). rtw89는 MAC 1에도 쓰지만 우리는 CMAC 1을 켜지 않습니다.
+        self.w32(R_BE_PWR_RSSI_TARGET_LMT, 0x0201_fe00)?;
+        self.w32(R_BE_PWR_TH, 0x00ff_ec7e)
+    }
+
     /// 채널을 바꿉니다 (__rtw89_set_channel의 PHY 0 부분; 송신 전력과 RF 보정은 아직).
     pub fn set_channel(&self, c: &Chan) -> io::Result<()> {
         // set_channel_help(enter): rtw8922a_pre_set_channel_bb/rf, hal_reset
@@ -270,6 +358,9 @@ impl Rtl8922a {
         self.set_channel_mac(c)?;
         self.set_channel_bb(c)?;
         self.set_channel_rf(c)?;
+        if let Some((t, regd)) = &self.txpwr {
+            self.set_txpwr(t, c, regd)?;
+        }
 
         // set_channel_help(exit): hal_reset, rtw8922a_post_set_channel_bb/rf
         self.hal_reset(c.band, false)?;
@@ -393,10 +484,10 @@ impl Rtl8922a {
     /// rtw8922a_chlk_reload: 이 채널의 RF 보정 표를 고르고 BB/RF가 그 표를 쓰게 합니다.
     fn chlk_reload(&self, c: &Chan) -> io::Result<()> {
         // rtw89_rfk_chan_lookup: 같은 채널이 있으면 그것, 없으면 맨 앞.
-        let mut tbl = self.rfk_tbl.get();
+        let mut tbl = self.rfk_tbl.lock().unwrap();
         let idx = tbl.iter().position(|t| t.as_ref() == Some(c)).unwrap_or(0);
         tbl[idx] = Some(*c);
-        self.rfk_tbl.set(tbl);
+        drop(tbl);
         for (coef, cfir, path) in [(R_COEF_SEL, R_CFIR_LUT, 0), (R_COEF_SEL_C1, R_CFIR_LUT_C1, 1)] {
             self.pw32_mask(coef, B_COEF_SEL_EN, 1)?;
             self.pw32_mask(coef, B_COEF_SEL_IQC_V1, idx as u32)?;
@@ -411,7 +502,7 @@ impl Rtl8922a {
 
     /// RF 보정 표의 채널들 ([Rtl8922a::chlk_reload]가 고른 자리).
     pub(super) fn rfk_table(&self) -> [Option<Chan>; RFK_TABLES] {
-        self.rfk_tbl.get()
+        *self.rfk_tbl.lock().unwrap()
     }
 
     /// rtw8922a_rfk_pll_init

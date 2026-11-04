@@ -198,6 +198,8 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
     let settings = Settings::load();
     let cards = Cards::start(events.clone(), &settings.island_at);
     let menu_installed = elevate::menu_installed();
+    // 켜 둔 채 부팅하면 BE6500UA는 가상 CD로 떠 있습니다 (꺼내면 USB 변화로 다시 봅니다).
+    crate::driver::eject_driver_cd();
     let mut hub = Hub {
         events: events.clone(),
         ui,
@@ -247,8 +249,8 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
             "adapter",
             t!("USB 어댑터를 꽂아 주세요", "Plug in the USB adapter"),
             t!(
-                "TP-Link Archer T3U Nano를 꽂으면 바로 시작합니다.",
-                "WirDrop starts as soon as a TP-Link Archer T3U Nano is in."
+                "T3U Nano나 BE6500UA를 꽂으면 바로 시작합니다.",
+                "WirDrop starts as soon as a T3U Nano or BE6500UA is in."
             ),
             &[],
         );
@@ -426,6 +428,7 @@ impl Hub {
             model: self.settings.model.clone().unwrap_or_default(),
             hevc,
             heif,
+            country: crate::win::country(),
         }
     }
 

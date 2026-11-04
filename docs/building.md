@@ -63,7 +63,7 @@ by hand (Actions → Release → Run workflow) to build everything without publi
 | Path | What | License |
 |---|---|---|
 | `crates/wirdrop` | the library (AWDL link, AirDrop) and `examples/wirdrop-cli.rs` | MIT |
-| `crates/radio` | wirdrop-radio, the adapter driver, and `usbfwd` | MIT, with BSD-3-Clause code from rtw88 ([NOTICE](../crates/radio/NOTICE.md)) |
+| `crates/radio` | wirdrop-radio, the adapter driver, and `usbfwd` | MIT, with BSD-3-Clause code from rtw88 and rtw89 ([NOTICE](../crates/radio/NOTICE.md)) |
 | `crates/app` | `WirDrop.exe`: tray app, engine, service, updater | MIT |
 | `crates/island` | the island (Windows.UI.Composition, Direct2D) | MIT; Pretendard (OFL) and Framework7 Icons (MIT) in `assets/` |
 | `crates/menu`, `crates/shell` | the WinUI 3 menus and the Explorer menu's DLL | MIT |

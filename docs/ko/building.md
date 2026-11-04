@@ -62,7 +62,7 @@ wirdrop-cli send .\photo.jpg --to iPhone
 | 경로 | 내용 | 라이선스 |
 |---|---|---|
 | `crates/wirdrop` | 라이브러리(AWDL 링크, AirDrop)와 `examples/wirdrop-cli.rs` | MIT |
-| `crates/radio` | 어댑터 드라이버 wirdrop-radio와 `usbfwd` | MIT, rtw88의 BSD-3-Clause 코드 포함 ([NOTICE](../../crates/radio/NOTICE.md)) |
+| `crates/radio` | 어댑터 드라이버 wirdrop-radio와 `usbfwd` | MIT, rtw88과 rtw89의 BSD-3-Clause 코드 포함 ([NOTICE](../../crates/radio/NOTICE.md)) |
 | `crates/app` | `WirDrop.exe`: 트레이 앱, 엔진, 서비스, 업데이트 | MIT |
 | `crates/island` | 아일랜드 (Windows.UI.Composition, Direct2D) | MIT; `assets/`의 Pretendard(OFL), Framework7 Icons(MIT) |
 | `crates/menu`, `crates/shell` | WinUI 3 메뉴와 탐색기 메뉴의 DLL | MIT |

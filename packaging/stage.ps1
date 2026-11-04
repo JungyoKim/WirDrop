@@ -46,10 +46,12 @@ $Out = (Resolve-Path $Out).Path
 $release = Join-Path $target 'release'
 
 # A running WirDrop holds its exe. The engine runs elevated, so ask the tray app to quit, and only
-# when the exe changed: starting the engine again asks for administrator rights.
+# when the exe changed and that WirDrop runs from here: --exit reaches any running WirDrop, including
+# an installed one this script has nothing to do with.
 $exeChanged = -not (Test-Path "$Out\WirDrop.exe") -or
     (Get-FileHash "$release\WirDrop.exe").Hash -ne (Get-FileHash "$Out\WirDrop.exe").Hash
-if ($exeChanged -and (Test-Path "$Out\WirDrop.exe")) {
+$runsHere = Get-Process WirDrop -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Out\*" }
+if ($exeChanged -and $runsHere) {
     & "$Out\WirDrop.exe" --exit
     for ($i = 0; $i -lt 20 -and (Get-Process WirDrop -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Out\*" }); $i++) {
         Start-Sleep -Milliseconds 250

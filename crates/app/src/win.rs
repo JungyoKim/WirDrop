@@ -12,10 +12,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
-/// usbfwd가 다룰 수 있는 USB 어댑터: 제조사, 제품, 이름.
+/// usbfwd가 다룰 수 있는 USB 어댑터: 제조사, 제품, 이름. 둘 다 꽂혀 있으면 앞의 것을 씁니다
+/// (usbfwd도 RTL8912AU를 먼저 고릅니다).
 pub const ADAPTERS: &[(u16, u16, &str)] = &[
-    (0x2357, 0x012e, "TP-Link Archer T3U Nano"),
     (0x0bda, 0x8912, "Realtek RTL8912AU (ipTIME BE6500UA)"),
+    (0x2357, 0x012e, "TP-Link Archer T3U Nano"),
 ];
 
 /// 방해 금지(또는 집중 세션)가 켜져 있습니다: Windows는 알림을 배너 없이 알림 센터에 넣습니다.
@@ -87,7 +88,7 @@ pub fn media_extensions() -> (bool, bool) {
     (has("Microsoft.HEVCVideoExtension"), has("Microsoft.HEIFImageExtension"))
 }
 
-/// 꽂혀 있는 첫 지원 어댑터.
+/// 꽂혀 있는 지원 어댑터 가운데 [ADAPTERS]에서 가장 앞의 것.
 pub fn find_adapter() -> Option<String> {
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         CM_GETIDLIST_FILTER_ENUMERATOR, CM_GETIDLIST_FILTER_PRESENT, CM_Get_Device_ID_List_SizeW, CM_Get_Device_ID_ListW, CR_SUCCESS,
@@ -105,13 +106,22 @@ pub fn find_adapter() -> Option<String> {
         }
         String::from_utf16_lossy(&buf)
     };
-    ids.split('\0').find_map(|id| {
-        let id = id.to_ascii_uppercase();
-        ADAPTERS
-            .iter()
-            .find(|(vid, pid, _)| id.contains(&format!("VID_{vid:04X}&PID_{pid:04X}")))
-            .map(|(_, _, name)| name.to_string())
-    })
+    let ids = ids.to_ascii_uppercase();
+    ADAPTERS
+        .iter()
+        .find(|(vid, pid, _)| ids.contains(&format!("VID_{vid:04X}&PID_{pid:04X}")))
+        .map(|(_, _, name)| name.to_string())
+}
+
+/// 사용자가 Windows 설정에서 고른 국가 또는 지역 (ISO 3166 두 글자, 예: "KR"). RTL8912AU의 송신
+/// 출력 한도를 그 나라 규제에 맞춥니다.
+pub fn country() -> Option<String> {
+    use windows::Win32::Globalization::GetUserDefaultGeoName;
+    let mut buf = [0u16; 16];
+    // SAFETY: 크기를 준 지역 버퍼.
+    let n = unsafe { GetUserDefaultGeoName(&mut buf) };
+    let name = String::from_utf16_lossy(&buf[..(n.max(1) as usize - 1).min(buf.len())]);
+    (name.len() == 2 && name.bytes().all(|b| b.is_ascii_alphabetic())).then(|| name.to_ascii_uppercase())
 }
 
 /// 콘솔 창 없는 명령.

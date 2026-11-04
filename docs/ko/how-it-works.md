@@ -11,19 +11,23 @@ Windows의 Wi-Fi 드라이버는 AWDL을 할 수 없어서 WirDrop은 자체 무
 
 ```mermaid
 flowchart LR
-    phone[iPhone] <-- "AWDL, 5 GHz 채널 149" --> nano[T3U Nano]
-    nano <-- "USB (WinUSB)" --> usbfwd["usbfwd (wirdrop-radio)<br/>RTL8822BU 드라이버: 하드웨어 ACK와 Block Ack,<br/>A-MPDU, 수신 재정렬, TCP ACK 조절"]
+    phone[iPhone] <-- "AWDL, 5 GHz 채널 149" --> nano["BE6500UA 또는 T3U Nano"]
+    nano <-- "USB (WinUSB)" --> usbfwd["usbfwd (wirdrop-radio)<br/>RTL8912AU와 RTL8822BU 드라이버: 하드웨어 ACK와<br/>Block Ack, A-MPDU, 수신 재정렬, TCP ACK 조절"]
     usbfwd <-- "루프백 UDP" --> node["owly-awdl<br/>AWDL 노드"]
     node <-- "IPv6" --> awdl0["Wintun 어댑터 awdl0"]
     awdl0 <--> tcp["Windows TCP/IP"]
     tcp <--> app["owly-airdrop<br/>mDNS, TLS, /Discover /Ask /Upload"]
 ```
 
-- **usbfwd**(`crates/radio`)는 WirDrop의 사용자 모드 RTL8822BU/RTL8812BU 드라이버
-  wirdrop-radio로 TP-Link Archer T3U Nano(Realtek RTL8812BU, USB `2357:012E`)를 다룹니다.
-  Windows 내장 WinUSB 드라이버와 이야기하므로 커널에서 도는 것이 없고 Secure Boot도 켠 채로 씁니다.
-  칩 초기화는 Linux [rtw88](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw88)에서
-  BSD-3-Clause로 옮겼고, Realtek의 재배포 가능한 펌웨어를 씁니다.
+- **usbfwd**(`crates/radio`)는 WirDrop의 사용자 모드 드라이버 wirdrop-radio로 랜카드를 다룹니다.
+  Realtek 칩 두 가지를 지원합니다: ipTIME BE6500UA의 RTL8912AU(USB `0BDA:8912`)와 TP-Link
+  Archer T3U Nano의 RTL8812BU(USB `2357:012E`). Windows 내장 WinUSB 드라이버와 이야기하므로
+  커널에서 도는 것이 없고 Secure Boot도 켠 채로 씁니다. 칩 초기화는 Linux
+  [rtw89](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw89)와
+  [rtw88](https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw88)에서
+  BSD-3-Clause로 옮겼고, Realtek의 재배포 가능한 펌웨어를 씁니다. BE6500UA는 꽂으면 먼저 Realtek
+  Windows 드라이버가 든 가상 CD로 나타나는데, WirDrop이 이를 꺼내 무선 랜카드로 다시 잡히게 합니다.
+  두 랜카드가 모두 꽂혀 있으면 BE6500UA를 씁니다.
 - **wirdrop**(`crates/wirdrop`)은 [owly](https://github.com/t4t5/owly)의 AWDL 노드를 그 무선과
   awdl0이라는 [Wintun](https://www.wintun.net) 어댑터 사이에서 돌리고, 그렇게 생긴 IPv6 링크
   위에서 owly의 AirDrop 보내기와 받기를 돌립니다.
@@ -60,7 +64,14 @@ PC를 같이 쓰는 사람마다 Apple ID를 하나씩 더할 수 있습니다. 
 
 ## 속도
 
-1 m 거리의 iPhone과 80 MB(79.75 MB) 영상을 주고받았을 때:
+1 m 거리의 iPhone과 BE6500UA로 687 MB 영상을 주고받았을 때:
+
+| 방향 | 걸린 시간 |
+|---|---|
+| iPhone → PC | 22.3초 (30.8 MB/s) |
+| PC → iPhone | iPhone이 수락한 뒤 28.2초 (24.3 MB/s) |
+
+T3U Nano로 80 MB(79.75 MB) 영상을 주고받았을 때:
 
 | 방향 | WirDrop | 처음 동작한 버전 |
 |---|---|---|
@@ -71,6 +82,6 @@ PC를 같이 쓰는 사람마다 Apple ID를 하나씩 더할 수 있습니다. 
 
 ## 알려진 한계
 
-- 어댑터 한 모델, 5 GHz 채널 149만 씁니다.
+- 랜카드 두 모델(BE6500UA, T3U Nano)과 5 GHz 채널 149만 씁니다.
 - 속도는 iPhone이 채널 149에 머무는 시간에 달려 있고, 그 시간은 iPhone이 정합니다.
 - 가끔 iPhone의 공유 시트를 다시 열어야 PC가 보입니다.

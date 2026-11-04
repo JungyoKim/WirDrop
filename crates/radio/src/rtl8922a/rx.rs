@@ -41,7 +41,7 @@ pub struct RxDesc {
 }
 
 /// 묶음 하나의 패킷들을 차례로 f(서술자, 내용)에 넘깁니다. 잘린 끝은 버립니다.
-pub fn packets(buf: &[u8], mut f: impl FnMut(&RxDesc, &[u8])) {
+pub fn packets<'a>(buf: &'a [u8], mut f: impl FnMut(&RxDesc, &'a [u8])) {
     let mut at = 0;
     while at + RXD_SHORT <= buf.len() {
         let d = &buf[at..];
@@ -100,4 +100,22 @@ pub fn c2h(data: &[u8]) -> Option<C2h<'_>> {
         func: bits(w0, 15, 8) as u8,
         payload: &data[8..len],
     })
+}
+
+/// PPDU 상태(rtw89_core_rx_process_mac_ppdu, rtw89_core_update_phy_ppdu)에서 경로 A, B의 세기 (dBm).
+pub fn ppdu_power(data: &[u8]) -> Option<[i8; 2]> {
+    let w0 = le32(data.get(..4)?, 0);
+    if w0 & (1 << 27) != 0 {
+        return None;
+    }
+    let users = (w0 & 0x1f) as usize;
+    let plcp = (((w0 >> 16) & 0xff) << 3) as usize;
+    let rx_cnt = if w0 & (1 << 29) != 0 { 128 } else { 0 };
+    let off = 8 + users * 4 + (users & 1) * 4 + rx_cnt + plcp;
+    let h = data.get(off..off + 8)?;
+    if h[0] & (1 << 7) == 0 {
+        return None;
+    }
+    let dbm = |v: u8| ((v >> 1) as i16 - 110) as i8;
+    Some([dbm(h[4]), dbm(h[5])])
 }

@@ -51,7 +51,7 @@ pub struct Tuning {
 }
 
 impl Tuning {
-    /// usbfwd로 구동하는 Realtek USB 어댑터 (TP-Link Archer T3U Nano).
+    /// usbfwd로 구동하는 Realtek USB 어댑터 (TP-Link Archer T3U Nano, ipTIME BE6500UA).
     pub fn usb_adapter() -> Self {
         Tuning {
             accept_addba: true,

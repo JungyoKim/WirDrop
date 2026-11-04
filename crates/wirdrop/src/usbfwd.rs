@@ -1,6 +1,6 @@
 //! USB 어댑터의 사용자 모드 드라이버 usbfwd를 자식 프로세스로 돌립니다.
 //!
-//! usbfwd(저장소의 crates/radio: WinUSB 위의 사용자 모드 RTL8822BU/RTL8812BU 드라이버
+//! usbfwd(저장소의 crates/radio: WinUSB 위의 사용자 모드 RTL8822BU/RTL8812BU와 RTL8912AU 드라이버
 //! wirdrop-radio)는 어댑터를 올리고, 우리 AWDL 주소의 ACK와 Block Ack을 하드웨어로 보내고, 상대의
 //! A-MPDU를 재정렬하고, 우리 TCP ACK의 간격을 조절하고, 프레임을 루프백 UDP로 넘깁니다
 //! ([crate::air] 참고). 올리기(펌웨어, 표, 보정)는 1초쯤 걸립니다.
@@ -16,7 +16,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// usbfwd는 무선이 올라와 채널에 있으면 이 줄을 남깁니다.
 const READY: &str = "usbfwd: ch ";
 
-/// usbfwd를 돌리는 방법. 기본값은 TP-Link Archer T3U Nano에서 재서 가장 좋았던 것입니다.
+/// usbfwd를 돌리는 방법. 기본값은 TP-Link Archer T3U Nano에서 재서 가장 좋았던 것이고, usbfwd는
+/// RTL8912AU(ipTIME BE6500UA)에도 같은 VHT 속도를 씁니다 (송신 출력 지수는 T3U에만 쓰고, RTL8912AU는
+/// Windows의 국가 설정에 맞는 규제 한도를 따릅니다).
 #[derive(Debug, Clone)]
 pub struct UsbfwdOptions {
     /// usbfwd.exe.

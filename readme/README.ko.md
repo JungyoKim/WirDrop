@@ -65,8 +65,9 @@ iPhone이 이 PC로 공유하면 화면 가장자리에서 카드가 흘러나�
 ## 필요한 것
 
 - Bluetooth가 있는 Windows 11 PC (64비트)
-- **TP-Link Archer T3U Nano** USB 무선 랜카드. 꽂혀 있는 동안 WirDrop의 AirDrop 전용 무선이
-  되므로, 인터넷은 평소 쓰던 Wi-Fi로 그대로 합니다.
+- USB 무선 랜카드: **ipTIME BE6500UA** 또는 **TP-Link Archer T3U Nano**. 꽂혀 있는 동안
+  WirDrop의 AirDrop 전용 무선이 되므로, 인터넷은 평소 쓰던 Wi-Fi로 그대로 합니다. 랜카드 자체
+  드라이버는 설치하지 않아도 됩니다.
 - AirDrop을 쓰는 iPhone이나 iPad
 
 ## 시작하기
@@ -74,7 +75,7 @@ iPhone이 이 PC로 공유하면 화면 가장자리에서 카드가 흘러나�
 1. [Releases](https://github.com/JungyoKim/WirDrop/releases/latest)에서 **WirDrop-Setup**을 받아
    실행합니다. 관리자 권한을 한 번 묻습니다. 아직 코드 서명이 없어 SmartScreen이 먼저 경고할 수
    있으니 **추가 정보**, **실행**을 차례로 누르세요.
-2. T3U Nano를 꽂습니다. 준비되면 트레이 아이콘이 파란색이 됩니다.
+2. 랜카드를 꽂습니다. 준비되면 트레이 아이콘이 파란색이 됩니다.
 3. iPhone에서 **공유**, **AirDrop**을 누르고 이 PC를 고릅니다. PC에서 보낼 때는 파일을 오른쪽
    클릭해 **AirDrop**을 고릅니다.
 
@@ -85,7 +86,7 @@ iPhone이 이 PC로 공유하면 화면 가장자리에서 카드가 흘러나�
 <summary><b>왜 USB 어댑터가 필요한가요?</b></summary>
 
 AirDrop은 Apple 고유의 Wi-Fi 링크인 AWDL로 동작하는데, Windows의 Wi-Fi 드라이버는 이를 지원하지
-않습니다. WirDrop은 일반 앱에서 Windows 내장 WinUSB 드라이버를 거쳐 T3U Nano를 직접 다룹니다. 커널
+않습니다. WirDrop은 일반 앱에서 Windows 내장 WinUSB 드라이버를 거쳐 랜카드를 직접 다룹니다. 커널
 드라이버를 설치하지 않으므로 Secure Boot도 켠 채로 씁니다. WirDrop을 제거하면 어댑터는 다시
 Windows가 씁니다.
 </details>
@@ -93,7 +94,8 @@ Windows가 씁니다.
 <details>
 <summary><b>얼마나 빠른가요?</b></summary>
 
-1 m 거리의 iPhone과 80 MB 영상을 주고받는 데 양방향 모두 약 3초(22~26 MB/s)가 걸립니다.
+1 m 거리의 iPhone과 BE6500UA로 687 MB 영상을 PC로 받는 데 약 22초(31 MB/s), 보내는 데 약
+28초(24 MB/s)가 걸립니다. T3U Nano로는 80 MB 영상이 양방향 모두 약 3초(22~26 MB/s)입니다.
 [동작 원리](../docs/ko/how-it-works.md#속도)를 보세요.
 </details>
 

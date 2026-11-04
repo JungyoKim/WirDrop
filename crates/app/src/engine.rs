@@ -210,7 +210,10 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
     let mut members = members(cfg, &state)?;
     // 이 PC의 모든 Apple ID: 그중 어느 것의 기기든 "내 기기"로 보고 묻지 않고 받습니다.
     let household: Vec<Account> = members.iter().filter_map(Member::account).cloned().collect();
-    let link_cfg = LinkConfig::usb(&cfg.name, state.awdl_mac()?, usbfwd, crate::paths::beside("wintun.dll"));
+    let mut link_cfg = LinkConfig::usb(&cfg.name, state.awdl_mac()?, usbfwd, crate::paths::beside("wintun.dll"));
+    if let Some(country) = &cfg.country {
+        link_cfg.usbfwd.env.push(("USBFWD_COUNTRY".into(), country.clone()));
+    }
     let ports: Vec<u16> = (0..members.len() as u16).map(|i| airdrop::PORT + i).collect();
     // netsh는 1초 가까이 걸리니, 더 오래 걸리는 어댑터와 나란히 합니다.
     let rules = if firewall.as_ref().is_some_and(|(p, _)| *p == ports) {

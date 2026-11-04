@@ -161,6 +161,9 @@ pub struct EngineConfig {
     pub hevc: bool,
     #[serde(default)]
     pub heif: bool,
+    /// Windows 설정의 국가 또는 지역 (ISO 3166 두 글자): 어댑터의 송신 출력 규제.
+    #[serde(default)]
+    pub country: Option<String>,
 }
 
 fn yes() -> bool {

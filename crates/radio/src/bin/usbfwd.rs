@@ -12,7 +12,9 @@
 //!
 //! 환경 변수:
 //!
-//!     USBFWD_VID / USBFWD_PID       어댑터 (기본 2357:012e, TP-Link Archer T3U Nano)
+//!     USBFWD_VID / USBFWD_PID       어댑터 (기본: 꽂혀 있는 것, RTL8912AU 0bda:8912가 먼저, 아니면
+//!                                   2357:012e TP-Link Archer T3U Nano)
+//!     USBFWD_COUNTRY=KR             RTL8912AU 송신 출력 한도의 나라 (ISO 3166 두 글자)
 //!     USBFWD_RETRY_LIMIT            유니캐스트 프레임의 하드웨어 재전송 횟수 (기본 8)
 //!     USBFWD_TX_POWER               모든 속도에 쓰는 고정 TXAGC 지수
 //!     USBFWD_DATA_VHT=nss/mcs[/sgi[/ldpc]]  채널 전체 폭을 쓰는 이 VHT 속도로 유니캐스트 데이터
@@ -44,9 +46,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering::Re
 use std::time::{Duration, Instant};
 
 use wirdrop_radio::dm::{Dm, rssi_of};
-use wirdrop_radio::radio::{AWDL_BSSID, C2h, mac_str};
+use wirdrop_radio::radio::{AWDL_BSSID, C2h, RATE_CODES, mac_str, rate_name, rate_streams};
 use wirdrop_radio::rtl8822b::{RXERR_MAC_DROP, RXERR_VHT_OK};
-use wirdrop_radio::{Config, Radio, RxFrame, TxFrame, TxRate, UsbId};
+use wirdrop_radio::{Config, Radio, RxFrame, TxFrame, TxRate, Usb, UsbId, rtl8922a};
 
 macro_rules! log {
     ($($t:tt)*) => {{
@@ -88,6 +90,10 @@ impl Vht {
         const ONE_STREAM: [u32; 10] = [293, 585, 878, 1170, 1755, 2340, 2633, 2925, 3510, 3900];
         ONE_STREAM[usize::from(self.mcs.min(9))] * u32::from(self.nss)
     }
+
+    fn name(self) -> String {
+        format!("VHT {}/{}", self.nss, self.mcs)
+    }
 }
 
 /// far_rssi보다 약하게 들리는 상대는 문턱 하나 아래마다 한 단계씩 더 느린 속도를 받습니다 (rtw88의
@@ -97,6 +103,7 @@ impl Vht {
 /// MCS1-3).
 const WEAKER: [(f32, Vht); 3] = [(40.0, Vht::new(2, 3)), (32.0, Vht::new(2, 1)), (26.0, Vht::new(1, 1))];
 
+/// nss/mcs[/sgi[/ldpc]].
 fn parse_vht(k: &str) -> Option<Vht> {
     let v = std::env::var(k).ok()?;
     let p: Vec<u8> = v.split('/').filter_map(|x| x.trim().parse().ok()).collect();
@@ -281,11 +288,23 @@ struct Relay {
     bfer_want: Mutex<Option<[u8; 6]>>,
     bfer_dirty: AtomicBool,
     rate_hist: Mutex<HashMap<u8, u64>>,
-    bw_hist: [AtomicU64; 3],
+    bw_hist: [AtomicU64; 4],
     path: Mutex<PathStats>,
     last_ppdu: Mutex<i32>,
     ndpa_logged: AtomicU64,
     stop: AtomicBool,
+    /// RTL8912AU의 안전장치: 신호가 센 상대가 우리에게 보낸 프레임을 거의 모두 거듭 보내면 상대가
+    /// 우리 응답(ACK, Block Ack)을 받지 못하는 것이므로, 최근 우리에게 온 유니캐스트 프레임과 그중
+    /// 재전송을 세어 (창의 시작, 수, 재전송) 알아차리고 어댑터를 다시 올립니다. 그렇게 되던 알려진
+    /// 원인 (비워 둔 상대의 CMAC 표, [rtl8922a::Rtl8922a::add_peer])은 고쳤습니다.
+    answers: Mutex<AnswerWindow>,
+    check_answers: bool,
+    /// 이때까지는 보지 않습니다 (다시 올리기가 너무 잦았을 때).
+    answers_paused: Mutex<Option<Instant>>,
+    /// 어댑터를 다시 올려야 합니다 (stop과 함께 켭니다).
+    restart: AtomicBool,
+    /// 순수 TCP ACK를 보내기 전에 기다리는 조용한 시간(µs, 0이면 곧바로 보냄).
+    ack_quiet_us: i64,
     /// AWDL 상대마다 부드럽게 한 RSSI(0-100)와 마지막으로 들린 때: 가장 약한 것이 수신 이득의
     /// 한계를 정합니다.
     peers: Mutex<HashMap<[u8; 6], (f32, Instant)>>,
@@ -319,6 +338,26 @@ struct Relay {
     ppdu_bulk: AtomicBool,
 }
 
+/// 1초 창 안에서 받은 유니캐스트 수와 그중 재전송, 그리고 (보낸 이, 순서 번호)마다 받은 횟수:
+/// 응답하지 못하는 칩에서는 상대가 프레임마다 재전송 한도까지 (iPhone은 일고여덟 번) 거듭 보냅니다.
+struct AnswerWindow {
+    start: Instant,
+    frames: u32,
+    retries: u32,
+    seen: HashMap<([u8; 6], u16), u8>,
+}
+
+impl AnswerWindow {
+    fn new() -> AnswerWindow {
+        AnswerWindow {
+            start: Instant::now(),
+            frames: 0,
+            retries: 0,
+            seen: HashMap::new(),
+        }
+    }
+}
+
 /// 데이터를 주고받는 상대가 우리 채널에 머무는 비율: AWDL 상대는 자기 Wi-Fi 네트워크의 채널도
 /// 돌보므로 전송 중 프레임 사이의 틈은 모두 데이터가 멈춘 시간입니다.
 #[derive(Default)]
@@ -347,8 +386,8 @@ struct PathStats {
 /// 이보다 큰 데이터 프레임을 파일 내용으로 봅니다. 상대가 우리 데이터에 답하는 TCP ACK와 Null
 /// 프레임은 작고 묶이지 않으며 20 MHz로도 와서, 누적 "rx rate" 줄을 흐립니다.
 const BULK: usize = 1000;
-/// 서술자 속도 코드의 수 ([rate_name]: VHT 4스트림까지).
-const RATES: usize = 84;
+/// 속도 부호의 수 ([rate_name]: VHT 4스트림, HE 2스트림까지).
+const RATES: usize = RATE_CODES;
 
 /// 우리에게 온 큰 데이터 프레임만 본 한 통계 구간: 상대가 어떤 속도로, 몇 개씩 묶어 보내는지, 그리고
 /// 같은 스트림 수의 프레임이 우리 쪽에서 얼마나 깨지는지. 상대가 2스트림을 두고 1스트림을 고른다면
@@ -362,8 +401,8 @@ struct Bulk {
     ppdus: u64,
     /// 속도 코드마다 받은 바이트.
     bytes_at: [u64; RATES],
-    /// PPDU의 대역폭 (PHY 상태는 PPDU의 첫 MPDU에만 있습니다): 20, 40, 80 MHz.
-    bw: [u64; 3],
+    /// PPDU의 대역폭 (PHY 상태는 PPDU의 첫 MPDU에만 있습니다): 20, 40, 80, 160 MHz.
+    bw: [u64; 4],
     /// 속도 코드마다 CRC가 맞은 것과 깨진 HT·VHT MPDU. 깨진 프레임은 주소를 믿을 수 없어 모든
     /// 송신자를 셉니다 (전송 중에는 거의 모두 그 상대입니다).
     ok_at: [u64; RATES],
@@ -379,7 +418,7 @@ impl Bulk {
         retries: 0,
         ppdus: 0,
         bytes_at: [0; RATES],
-        bw: [0; 3],
+        bw: [0; 4],
         ok_at: [0; RATES],
         bad_at: [0; RATES],
         ndpa: 0,
@@ -391,7 +430,7 @@ impl Bulk {
         let pct = |part: u64, whole: u64| 100.0 * part as f64 / whole.max(1) as f64;
         let mut per_stream = Vec::new();
         for nss in 1..=2u8 {
-            let codes = || (0..RATES as u8).filter(move |&c| streams(c) == Some(nss));
+            let codes = || (0..RATES as u8).filter(move |&c| rate_streams(c) == Some(nss));
             let bytes: u64 = codes().map(|c| self.bytes_at[c as usize]).sum();
             let (ok, bad) = codes().fold((0, 0), |(o, b), c| (o + self.ok_at[c as usize], b + self.bad_at[c as usize]));
             let top = codes()
@@ -407,26 +446,18 @@ impl Bulk {
             per_stream.push(format!("{nss}SS {:.0}% (mostly {top}, CRC lost {lost})", pct(bytes, self.bytes)));
         }
         format!(
-            "bulk to us: {} frames {:.1} MB | {} | PPDU bw 20/40/80 {}/{}/{} | {:.1} MPDU per PPDU | retry {:.0}% | NDPA {}",
+            "bulk to us: {} frames {:.1} MB | {} | PPDU bw 20/40/80/160 {}/{}/{}/{} | {:.1} MPDU per PPDU | retry {:.0}% | NDPA {}",
             self.frames,
             self.bytes as f64 / 1e6,
             per_stream.join(" | "),
             self.bw[0],
             self.bw[1],
             self.bw[2],
+            self.bw[3],
             self.frames as f64 / self.ppdus.max(1) as f64,
             pct(self.retries, self.frames),
             self.ndpa
         )
-    }
-}
-
-/// 속도 코드의 공간 스트림 수 (HT·VHT만, [rate_name]과 같은 배치).
-fn streams(code: u8) -> Option<u8> {
-    match code {
-        12..=43 => Some((code - 12) / 8 + 1),
-        44..=83 => Some((code - 44) / 10 + 1),
-        _ => None,
     }
 }
 
@@ -446,7 +477,7 @@ impl Relay {
             .map_or((0, v), |(i, (_, r))| (i + 1, r));
         let Ok(peer) = <[u8; 6]>::try_from(dst) else { return rate };
         if self.rate_step.lock().unwrap().insert(peer, step) != Some(step) {
-            log!("{} heard at RSSI {rssi:.0}: data at VHT {}/{}", mac_str(dst), rate.nss, rate.mcs);
+            log!("{} heard at RSSI {rssi:.0}: data at {}", mac_str(dst), rate.name());
         }
         rate
     }
@@ -680,7 +711,7 @@ impl Relay {
         if self.prev_ppdu.swap(p.ppdu_cnt, Relaxed) != p.ppdu_cnt {
             self.ppdu_bulk.store(false, Relaxed);
         }
-        let ht = streams(p.rate).is_some();
+        let ht = rate_streams(p.rate).is_some();
         if p.crc_err || p.icv_err {
             s.rx_bad.fetch_add(1, Relaxed);
             if p.crc_err && ht {
@@ -701,6 +732,9 @@ impl Relay {
         }
         let ty = (f[0] >> 2) & 3;
         let to_us = f[4..10] == self.ours;
+        if to_us && ty != 1 && f[10] & 1 == 0 && self.check_answers {
+            self.check_answered(f);
+        }
         if to_us || f[16..22] == AWDL_BSSID {
             let mut ta = [0u8; 6];
             ta.copy_from_slice(&f[10..16]);
@@ -846,7 +880,7 @@ impl Relay {
                     *at += len as u64;
                 }
                 if let Some(phy) = p.phy {
-                    b.bw[(phy.bw as usize).min(2)] += 1;
+                    b.bw[(phy.bw as usize).min(3)] += 1;
                 }
             }
             let mut ta = [0u8; 6];
@@ -874,7 +908,7 @@ impl Relay {
                 }
             }
             if let Some(phy) = p.phy {
-                self.bw_hist[(phy.bw as usize).min(2)].fetch_add(1, Relaxed);
+                self.bw_hist[(phy.bw as usize).min(3)].fetch_add(1, Relaxed);
                 let mut ps = self.path.lock().unwrap();
                 ps.n += 1;
                 for i in 0..2 {
@@ -906,6 +940,48 @@ impl Relay {
             self.ro_input(&out, &f[10..16], f[24] & 0x0f, u16::from_le_bytes([f[22], f[23]]) >> 4, Instant::now());
         } else {
             self.send_up(&out);
+        }
+    }
+
+    /// 우리에게 온 유니캐스트 프레임 하나: 1초 창 안에서 8개 이상 가운데 4분의 3 넘게 재전송이거나,
+    /// 서로 다른 프레임 셋 이상이 저마다 다섯 번 넘게 오면 상대가 우리 응답을 받지 못하는 것으로
+    /// 봅니다 (정상일 때 재전송은 몇 %). 다시 올린 직후에는 상대가 그동안 쌓인 프레임을 재전송으로
+    /// 보내므로 잠시 보지 않고 (run의 다시 올리기), 먼 상대는 약한 신호 탓에 우리 ACK을 놓치므로 신호가
+    /// 약한 상대(RSSI 40 아래)는 보지 않습니다.
+    fn check_answered(&self, f: &[u8]) {
+        if self.answers_paused.lock().unwrap().is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let mut ta = [0u8; 6];
+        ta.copy_from_slice(&f[10..16]);
+        if self.peers.lock().unwrap().get(&ta).is_none_or(|(rssi, _)| *rssi < 40.0) {
+            return;
+        }
+        let seq = u16::from_le_bytes([f[22], f[23]]) >> 4;
+        let mut a = self.answers.lock().unwrap();
+        if a.start.elapsed() >= Duration::from_secs(1) {
+            *a = AnswerWindow::new();
+        }
+        a.frames += 1;
+        if f[1] & 0x08 != 0 {
+            a.retries += 1;
+        }
+        let (frames, retries) = (a.frames, a.retries);
+        let n = a.seen.entry((ta, seq)).or_default();
+        *n = n.saturating_add(1);
+        let repeated = if *n == 5 {
+            a.seen.iter().filter(|((t, _), c)| *t == ta && **c >= 5).count()
+        } else {
+            0
+        };
+        if repeated >= 3 || (frames >= 16 && retries * 5 > frames * 4) {
+            *a = AnswerWindow::new();
+            log!(
+                "the adapter isn't answering: {retries} of {frames} frames came again ({repeated} of them 5 times or more), last from {}; bringing it up again",
+                mac_str(&ta)
+            );
+            self.restart.store(true, Relaxed);
+            self.stop.store(true, Relaxed);
         }
     }
 
@@ -1037,7 +1113,7 @@ impl Relay {
                 ps.snr[1] as f64 / (2.0 * n),
                 ps.evm[0] as f64 / (2.0 * n),
                 ps.evm[1] as f64 / (2.0 * n),
-                radio.chip.igi().unwrap_or(0)
+                radio.rtw88().and_then(|c| c.igi().ok()).unwrap_or(0)
             );
             *ps = PathStats::default();
         }
@@ -1056,11 +1132,12 @@ impl Relay {
                 .collect::<Vec<_>>();
             let pc = g(&s.ppdu_count);
             log!(
-                "rx rate {} | bw 20/40/80 {}/{}/{} | mean aggregate {:.1} MPDU of {:.0} bytes",
+                "rx rate {} | bw 20/40/80/160 {}/{}/{}/{} | mean aggregate {:.1} MPDU of {:.0} bytes",
                 top.join(", "),
                 g(&self.bw_hist[0]),
                 g(&self.bw_hist[1]),
                 g(&self.bw_hist[2]),
+                g(&self.bw_hist[3]),
                 if pc > 0 { g(&s.ppdu_frames) as f64 / pc as f64 } else { 0.0 },
                 g(&s.rx_to_us_bytes) as f64 / g(&s.rx_to_us).max(1) as f64
             );
@@ -1069,7 +1146,10 @@ impl Relay {
             // 파일 내용만 본 이번 구간: 전송이 있었을 때만 남기고, 구간마다 비웁니다.
             let b = std::mem::replace(&mut *self.bulk.lock().unwrap(), Bulk::EMPTY);
             // 무선으로 멀쩡히 받고도 MAC이 버린 것 (FIFO가 USB보다 빨리 참).
-            let mac = radio.chip.rx_reports(&[RXERR_MAC_DROP, RXERR_VHT_OK]).unwrap_or_default();
+            let mac = radio
+                .rtw88()
+                .and_then(|c| c.rx_reports(&[RXERR_MAC_DROP, RXERR_VHT_OK]).ok())
+                .unwrap_or_default();
             let at = |i: usize| mac.get(i).copied().unwrap_or(0);
             if b.frames >= 200 {
                 log!("{}", b.summary());
@@ -1172,17 +1252,6 @@ fn bar_frame(ra: &[u8; 6], ta: &[u8; 6], ssn: u16) -> Vec<u8> {
     f.extend_from_slice(&0x0004u16.to_le_bytes()); // 보통 ACK, 압축 비트맵, TID 0
     f.extend_from_slice(&(ssn << 4).to_le_bytes());
     f
-}
-
-/// Realtek 서술자 속도: 0-3 CCK, 4-11 OFDM, 12-43 HT MCS0-31, 그다음 스트림마다 VHT 열 개.
-fn rate_name(code: u8) -> String {
-    const LEGACY: [&str; 12] = ["1M", "2M", "5.5M", "11M", "6M", "9M", "12M", "18M", "24M", "36M", "48M", "54M"];
-    match code {
-        0..=11 => LEGACY[code as usize].to_string(),
-        12..=43 => format!("HT_MCS{}", code - 12),
-        44..=83 => format!("VHT{}SS_MCS{}", (code - 44) / 10 + 1, (code - 44) % 10),
-        _ => format!("code{code}"),
-    }
 }
 
 /// AWDL 데이터 프레임 안의 TCP 헤더 (802.11 헤더, Apple OUI의 LLC/SNAP, 6바이트 AWDL 데이터 헤더,
@@ -1317,16 +1386,25 @@ fn run() -> io::Result<()> {
         log!("--mac must be a unicast aa:bb:cc:dd:ee:ff");
         usage()
     })?;
-    if ![20, 40, 80].contains(&bw) {
+    // 어댑터: 환경 변수로 고른 것, 아니면 꽂혀 있는 RTL8912AU, 아니면 T3U Nano.
+    let usb = match (env_num("USBFWD_VID"), env_num("USBFWD_PID")) {
+        (Some(vid), Some(pid)) => UsbId { vid, pid },
+        _ if Usb::present(UsbId::RTL8912AU) => UsbId::RTL8912AU,
+        _ => UsbId::T3U_NANO,
+    };
+    let rtw89 = rtl8922a::USB_IDS.contains(&usb);
+    if !([20, 40, 80].contains(&bw) || rtw89 && bw == 160) {
         return Err(usage());
     }
     let bw_code = match bw {
+        160 => 3,
         80 => 2,
         40 => 1,
         _ => 0,
     };
     let vht = parse_vht("USBFWD_DATA_VHT");
     let ack_vht = parse_vht("USBFWD_ACK_VHT").or(vht);
+    let far_vht = parse_vht("USBFWD_FAR_VHT").unwrap_or(Vht::new(2, 5));
     let reorder_ms = env_num::<u64>("USBFWD_REORDER_MS").unwrap_or(80);
     let ack_quiet_us = env_num::<i64>("USBFWD_ACK_QUIET_US").unwrap_or(200).max(0);
     let ack_hold_us = env_num::<u64>("USBFWD_ACK_HOLD_US").unwrap_or(2000).max(100);
@@ -1340,14 +1418,16 @@ fn run() -> io::Result<()> {
     sock.set_read_timeout(Some(Duration::from_millis(1)))?;
     let peer_addr: SocketAddr = peer.parse().map_err(|_| usage())?;
 
-    let usb = UsbId {
-        vid: env_num("USBFWD_VID").unwrap_or(UsbId::T3U_NANO.vid),
-        pid: env_num("USBFWD_PID").unwrap_or(UsbId::T3U_NANO.pid),
-    };
     let ampdu_spec = std::env::var("USBFWD_AMPDU").unwrap_or_default();
     let ampdu_field = |i: usize| ampdu_spec.split('/').nth(i).and_then(|m| m.trim().parse::<u8>().ok());
     let ampdu_max = ampdu_field(1).unwrap_or(16);
     let ampdu_density = ampdu_field(2).unwrap_or(6).min(7);
+    let country = std::env::var("USBFWD_COUNTRY")
+        .ok()
+        .and_then(|s| match s.trim().to_ascii_uppercase().as_bytes() {
+            &[a, b] if a.is_ascii_alphabetic() && b.is_ascii_alphabetic() => Some([a, b]),
+            _ => None,
+        });
     let cfg = Config {
         usb,
         channel,
@@ -1358,10 +1438,11 @@ fn run() -> io::Result<()> {
         igi: env_num("USBFWD_IGI"),
         ampdu_max,
         ampdu_density,
+        country,
         ..Config::default()
     };
-    let radio = Radio::open(cfg)?;
-    log!("adapter {:04x}:{:04x}, EFUSE MAC {}", usb.vid, usb.pid, mac_str(&radio.chip.efuse.mac));
+    let mut radio = Radio::open(cfg.clone())?;
+    log!("adapter {} ({:04x}:{:04x})", radio.name(), usb.vid, usb.pid);
     let relay = Relay {
         ours,
         sock,
@@ -1371,12 +1452,7 @@ fn run() -> io::Result<()> {
         stats: Stats::default(),
         tx_ba,
         ack_vo,
-        far_vht: parse_vht("USBFWD_FAR_VHT").unwrap_or(Vht {
-            nss: 2,
-            mcs: 5,
-            sgi: false,
-            ldpc: false,
-        }),
+        far_vht,
         far_rssi: env_num::<f32>("USBFWD_FAR_RSSI").unwrap_or(50.0),
         rate_step: Mutex::new(HashMap::new()),
         ba: Mutex::new(BaTable::default()),
@@ -1407,61 +1483,102 @@ fn run() -> io::Result<()> {
         bulk: Mutex::new(Bulk::EMPTY),
         prev_ppdu: AtomicU8::new(0),
         ppdu_bulk: AtomicBool::new(false),
+        answers: Mutex::new(AnswerWindow::new()),
+        check_answers: radio.rtw89().is_some(),
+        answers_paused: Mutex::new(None),
+        restart: AtomicBool::new(false),
+        ack_quiet_us,
     };
     if tx_ba {
         log!("Block Ack mode on: A-MPDU of up to {ampdu_max} MPDUs to peers that agree, USB TX aggregation 3");
     }
-    if ack_vo {
-        // 백오프 없는 AIFSN 2: 최선 노력 송신자는 AIFSN 3에 백오프까지 기다립니다.
-        match radio.set_voice_access(34, 0, 2) {
-            Ok(()) => log!("pure TCP ACKs through the voice queue: 34 us, no backoff"),
-            Err(e) => log!("voice queue access: {e}"),
+    // 백오프 없는 AIFSN 2: 최선 노력 송신자는 AIFSN 3에 백오프까지 기다립니다.
+    let voice_access = |radio: &Radio| {
+        if ack_vo {
+            match radio.set_voice_access(34, 0, 2) {
+                Ok(()) => log!("pure TCP ACKs through the voice queue: 34 us, no backoff"),
+                Err(e) => log!("voice queue access: {e}"),
+            }
         }
-    }
-    let fmt_vht = |v: Option<Vht>| v.map(|v| format!("{}/{}", v.nss, v.mcs)).unwrap_or_else(|| "off".into());
+    };
+    voice_access(&radio);
+    let fmt_vht = |v: Option<Vht>| v.map(Vht::name).unwrap_or_else(|| "off".into());
     log!(
-        "ch {channel}/{bw} MHz, mac {}, ack responder armed, retries {}, data VHT {}, ack VHT {}, reorder {reorder_ms} ms, ack pacing {ack_quiet_us}/{ack_hold_us} us, UDP 127.0.0.1:{port} <-> {peer}",
+        "ch {channel}/{bw} MHz, mac {}, ack responder armed, retries {}, data {}, ack {}, far {}, reorder {reorder_ms} ms, ack pacing {ack_quiet_us}/{ack_hold_us} us, UDP 127.0.0.1:{port} <-> {peer}",
         mac_str(&ours),
         radio.cfg.retry_limit,
         fmt_vht(vht),
-        fmt_vht(ack_vht)
+        fmt_vht(ack_vht),
+        far_vht.name()
     );
 
-    std::thread::scope(|s| {
-        let rx_thread = s.spawn(|| {
-            raise_thread();
-            let mut rx = match radio.receiver(8) {
-                Ok(rx) => rx,
-                Err(e) => {
-                    log!("{e}");
-                    relay.stop.store(true, Relaxed);
-                    return;
-                }
-            };
-            while !relay.stop.load(Relaxed) {
-                if let Err(e) = rx.next(|buf| Radio::parse_with_c2h(buf, |f| relay.on_rx(&f), |m| relay.on_c2h(m))) {
-                    if !relay.stop.load(Relaxed) {
-                        log!("receive: {e}");
+    // 다시 올린 때들: 2분에 다섯 번이면 칩이 아니라 먼 상대의 약한 링크로 보고 2분 동안 보지 않습니다.
+    let mut restarts: Vec<Instant> = Vec::new();
+    loop {
+        std::thread::scope(|s| {
+            let rx_thread = s.spawn(|| {
+                raise_thread();
+                let mut rx = match radio.receiver(8) {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        log!("{e}");
+                        relay.stop.store(true, Relaxed);
+                        return;
                     }
-                    relay.stop.store(true, Relaxed);
+                };
+                while !relay.stop.load(Relaxed) {
+                    if let Err(e) = rx.next(|buf| radio.parse_with_c2h(buf, |f| relay.on_rx(&f), |m| relay.on_c2h(m))) {
+                        if !relay.stop.load(Relaxed) {
+                            log!("receive: {e}");
+                        }
+                        relay.stop.store(true, Relaxed);
+                    }
                 }
-            }
+            });
+            s.spawn(|| watchdog(&radio, &relay));
+            raise_thread();
+            tx_loop(&radio, &relay, stop_file.clone(), bw_code, vht, ack_vht, ack_hold_us);
+            relay.stop.store(true, Relaxed);
+            radio.abort_rx();
+            let _ = rx_thread.join();
         });
-        s.spawn(|| watchdog(&radio, &relay));
-        raise_thread();
-        tx_loop(&radio, &relay, stop_file, bw_code, vht, ack_vht, ack_quiet_us, ack_hold_us);
-        relay.stop.store(true, Relaxed);
-        radio.chip.regs.usb.abort_in();
-        let _ = rx_thread.join();
-    });
+        if !relay.restart.swap(false, Relaxed) {
+            break;
+        }
+        restarts.retain(|t| t.elapsed() < Duration::from_secs(120));
+        restarts.push(Instant::now());
+        if restarts.len() >= 5 {
+            log!("brought the adapter up again 5 times in 2 minutes: it's the link, not the adapter; not checking for 2 minutes");
+            *relay.answers_paused.lock().unwrap() = Some(Instant::now() + Duration::from_secs(120));
+            restarts.clear();
+        }
+        let t = Instant::now();
+        // 상대들은 우리를 그대로 기억하고 곧바로 RTS나 A-MPDU를 보내므로, 앞의 주소 CAM과 Block Ack
+        // 합의를 새 칩에 다시 씁니다.
+        let peers = radio.peers();
+        radio.close();
+        radio = Radio::open(cfg.clone())?;
+        radio.restore_peers(peers);
+        voice_access(&radio);
+        *relay.answers.lock().unwrap() = AnswerWindow::new();
+        // 그동안 쌓였던 프레임이 재전송으로 몰려옵니다.
+        let mut paused = relay.answers_paused.lock().unwrap();
+        let hold = Instant::now() + Duration::from_secs(4);
+        if paused.is_none_or(|t| t < hold) {
+            *paused = Some(hold);
+        }
+        drop(paused);
+        relay.stop.store(false, Relaxed);
+        log!("adapter up again in {} ms", t.elapsed().as_millis());
+    }
     relay.print_stats(&radio);
     radio.close();
     log!("stopped");
     Ok(())
 }
 
-/// 2초마다 도는 rtw88의 watchdog: 최근 10초에 들린 가장 약한 AWDL 상대로 한계를 둔 동적 초기 이득
-/// (없으면 커버리지 모드), 그것을 따르는 EDCCA 문턱, 송신 출력 추적.
+/// 2초마다 도는 watchdog: 최근 10초에 들린 가장 약한 AWDL 상대로 한계를 둔 동적 초기 이득
+/// (없으면 커버리지 모드). RTL8822B는 그것을 따르는 EDCCA 문턱과 송신 출력 추적도 합니다.
 fn watchdog(radio: &Radio, relay: &Relay) {
     let mut dm = Dm::default();
     dm.edcca = env_num::<u32>("USBFWD_EDCCA").unwrap_or(0) != 0;
@@ -1489,13 +1606,37 @@ fn watchdog(radio: &Radio, relay: &Relay) {
             data.values_mut().for_each(|e| e.2 = 0);
             busy.or(linked).or_else(|| peers.values().map(|(r, _)| *r as u8).min())
         };
+        if let Some(chip) = radio.rtw89() {
+            if radio.cfg.igi.is_none() {
+                match chip.watchdog(radio.cfg.bw_mhz, min_rssi) {
+                    Ok(rep) => {
+                        runs += 1;
+                        if runs % 15 == 1 || rep.pd.abs_diff(logged_igi) >= 2 {
+                            logged_igi = rep.pd;
+                            log!(
+                                "watchdog: packet detect floor {} (weakest peer RSSI {})",
+                                if rep.pd == 0 {
+                                    "off".to_string()
+                                } else {
+                                    format!("{} dBm", rep.floor_dbm)
+                                },
+                                min_rssi.map(|r| r.to_string()).unwrap_or_else(|| "-".into())
+                            );
+                        }
+                    }
+                    Err(e) => log!("watchdog: {e}"),
+                }
+            }
+            continue;
+        }
+        let Some(chip) = radio.rtw88() else { continue };
         if radio.cfg.igi.is_some() {
-            if let Ok(c) = radio.chip.counters() {
+            if let Ok(c) = chip.counters() {
                 relay.add_crc(&c);
             }
             continue;
         }
-        match radio.chip.watchdog(&mut dm, min_rssi, tx_power) {
+        match chip.watchdog(&mut dm, min_rssi, tx_power) {
             Ok(rep) => {
                 relay.add_crc(&rep.counters);
                 runs += 1;
@@ -1507,7 +1648,7 @@ fn watchdog(radio: &Radio, relay: &Relay) {
                         rep.igi,
                         min_rssi.map(|r| r.to_string()).unwrap_or_else(|| "-".into()),
                         rep.thermal.map(|t| t.to_string()).unwrap_or_else(|| "-".into()),
-                        radio.chip.efuse.thermal_meter,
+                        chip.efuse.thermal_meter,
                         if rep.iqk { ", IQK again" } else { "" }
                     );
                 }
@@ -1525,7 +1666,6 @@ fn tx_loop(
     bw_code: u8,
     vht: Option<Vht>,
     ack_vht: Option<Vht>,
-    ack_quiet_us: i64,
     ack_hold_us: u64,
 ) {
     const BATCH: usize = 16;
@@ -1533,7 +1673,12 @@ fn tx_loop(
     // 프레임, 속도, A-MPDU, ACK 없음, 송신 보고 번호
     type Queued = (Vec<u8>, TxRate, bool, bool, Option<u8>, bool);
     let mut pool: Vec<Queued> = Vec::with_capacity(BATCH);
-    let report_every = env_num::<u32>("USBFWD_TX_REPORT").unwrap_or(8);
+    // 송신 보고는 RTL8822B 펌웨어만 답합니다.
+    let report_every = if radio.has_tx_reports() {
+        env_num::<u32>("USBFWD_TX_REPORT").unwrap_or(8)
+    } else {
+        0
+    };
     let (rpt_count, rpt_sn) = (std::cell::Cell::new(0u32), std::cell::Cell::new(0u8));
     let mut last = Instant::now();
     let mut last_stop = last;
@@ -1614,6 +1759,7 @@ fn tx_loop(
     while !relay.stop.load(Relaxed) {
         let got = relay.sock.recv_from(&mut buf);
         let now = Instant::now();
+        let ack_quiet_us = relay.ack_quiet_us;
         if relay.reorder_ms > 0 {
             relay.ro_tick(now);
         }
