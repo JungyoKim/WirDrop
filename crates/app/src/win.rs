@@ -13,7 +13,10 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
 
 /// usbfwd가 다룰 수 있는 USB 어댑터: 제조사, 제품, 이름.
-pub const ADAPTERS: &[(u16, u16, &str)] = &[(0x2357, 0x012e, "TP-Link Archer T3U Nano")];
+pub const ADAPTERS: &[(u16, u16, &str)] = &[
+    (0x2357, 0x012e, "TP-Link Archer T3U Nano"),
+    (0x0bda, 0x8912, "Realtek RTL8912AU (ipTIME BE6500UA)"),
+];
 
 /// 방해 금지(또는 집중 세션)가 켜져 있습니다: Windows는 알림을 배너 없이 알림 센터에 넣습니다.
 pub fn do_not_disturb() -> bool {

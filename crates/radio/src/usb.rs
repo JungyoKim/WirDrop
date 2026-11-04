@@ -15,7 +15,7 @@ use windows::Win32::Devices::Usb::{
     WinUsb_GetOverlappedResult, WinUsb_Initialize, WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_ReadPipe, WinUsb_SetPipePolicy,
     WinUsb_WritePipe,
 };
-use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows::Win32::System::IO::OVERLAPPED;
 use windows::Win32::System::Registry::{
@@ -38,6 +38,8 @@ pub struct UsbId {
 impl UsbId {
     /// TP-Link Archer T3U Nano (RTL8812BU).
     pub const T3U_NANO: UsbId = UsbId { vid: 0x2357, pid: 0x012e };
+    /// Realtek RTL8912AU의 기본 ID (ipTIME BE6500UA 등).
+    pub const RTL8912AU: UsbId = UsbId { vid: 0x0bda, pid: 0x8912 };
 }
 
 /// 어댑터의 WinUSB 인터페이스.
@@ -45,9 +47,13 @@ pub struct Usb {
     file: HANDLE,
     winusb: WINUSB_INTERFACE_HANDLE,
     pub bulk_in: u8,
+    /// 서술자 순서대로의 벌크 IN 엔드포인트 (rtw89의 in_pipe[]: 첫 번째가 수신).
+    pub bulk_ins: Vec<u8>,
     /// 서술자 순서대로의 벌크 OUT 엔드포인트 (rtw88의 out_ep[]).
     pub bulk_out: Vec<u8>,
     pub high_speed: bool,
+    /// 벌크 IN의 최대 패킷 크기: 1024면 USB 3 (SuperSpeed), 512면 USB 2 (High Speed).
+    pub max_packet: u16,
     /// 제어 전송은 아래의 8822B 특이점 때문에 레지스터 접근 하나를 두 단계로 나릅니다. 한 번에
     /// 하나씩.
     ctrl: Mutex<()>,
@@ -175,8 +181,10 @@ impl Usb {
                 file,
                 winusb,
                 bulk_in: 0,
+                bulk_ins: Vec::new(),
                 bulk_out: Vec::new(),
                 high_speed: true,
+                max_packet: 0,
                 ctrl: Mutex::new(()),
             };
             let mut desc = USB_INTERFACE_DESCRIPTOR::default();
@@ -189,7 +197,9 @@ impl Usb {
                 }
                 if pipe.PipeId & 0x80 != 0 {
                     usb.bulk_in = pipe.PipeId;
+                    usb.bulk_ins.push(pipe.PipeId);
                     usb.high_speed = pipe.MaximumPacketSize >= 512;
+                    usb.max_packet = pipe.MaximumPacketSize;
                 } else {
                     usb.bulk_out.push(pipe.PipeId);
                 }
@@ -197,7 +207,9 @@ impl Usb {
             if usb.bulk_in == 0 || usb.bulk_out.is_empty() {
                 return Err(io::Error::other("the adapter has no bulk endpoints"));
             }
-            usb.policy(usb.bulk_in, RAW_IO, 1u8)?;
+            for &ep in &usb.bulk_ins.clone() {
+                usb.policy(ep, RAW_IO, 1u8)?;
+            }
             for &ep in &usb.bulk_out.clone() {
                 // rtw88은 URB_ZERO_PACKET을 보냅니다: 패킷 크기의 배수인 전송은 길이 0인 패킷으로
                 // 끝나야 하고, 아니면 어댑터가 더 기다립니다.
@@ -216,11 +228,16 @@ impl Usb {
     }
 
     fn control(&self, request_type: u8, addr: u16, buf: &mut [u8]) -> io::Result<()> {
+        self.control_at(request_type, addr as u32, buf)
+    }
+
+    /// 주소의 아래 16비트는 wValue, 그 위 8비트는 wIndex로 (rtw89의 vendorreq).
+    fn control_at(&self, request_type: u8, addr: u32, buf: &mut [u8]) -> io::Result<()> {
         let setup = WINUSB_SETUP_PACKET {
             RequestType: request_type,
             Request: REQ,
-            Value: addr,
-            Index: 0,
+            Value: addr as u16,
+            Index: ((addr >> 16) & 0xff) as u16,
             Length: buf.len() as u16,
         };
         let mut done = 0u32;
@@ -228,8 +245,8 @@ impl Usb {
             // SAFETY: buf는 동기 전송 동안 유효합니다.
             match unsafe { WinUsb_ControlTransfer(self.winusb, setup, Some(&mut *buf), Some(&mut done), None) } {
                 Ok(()) if done as usize == buf.len() => return Ok(()),
-                Ok(()) => return Err(io::Error::other(format!("register 0x{addr:04x}: short transfer {done}"))),
-                Err(e) if attempt == 2 => return Err(io::Error::other(format!("register 0x{addr:04x}: {e}"))),
+                Ok(()) => return Err(io::Error::other(format!("register 0x{addr:05x}: short transfer {done}"))),
+                Err(e) if attempt == 2 => return Err(io::Error::other(format!("register 0x{addr:05x}: {e}"))),
                 Err(_) => {}
             }
         }
@@ -258,6 +275,21 @@ impl Usb {
         self.control(WRITE, addr, &mut b[..len])?;
         self.reg_sec(addr, &mut b);
         Ok(())
+    }
+
+    /// 24비트 주소의 레지스터 읽기 (rtw89 칩). 8822B의 0x4e0 특이점은 없습니다.
+    pub fn read_wide(&self, addr: u32, len: usize) -> io::Result<u32> {
+        let _g = self.ctrl.lock().unwrap();
+        let mut b = [0u8; 4];
+        self.control_at(READ, addr, &mut b[..len])?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    /// 24비트 주소의 레지스터 쓰기 (rtw89 칩).
+    pub fn write_wide(&self, addr: u32, val: u32, len: usize) -> io::Result<()> {
+        let _g = self.ctrl.lock().unwrap();
+        let mut b = val.to_le_bytes();
+        self.control_at(WRITE, addr, &mut b[..len])
     }
 
     /// 벌크 OUT 전송 한 번 (막힘).
@@ -341,20 +373,31 @@ impl Reader<'_> {
 
     /// 다음 전송을 기다려 그 바이트를 `f`에 넘기고 다시 제출합니다.
     pub fn next<R>(&mut self, f: impl FnOnce(&[u8]) -> R) -> io::Result<R> {
+        Ok(self.wait(INFINITE, f)?.expect("no timeout"))
+    }
+
+    /// [Reader::next]와 같지만 timeout 안에 전송이 끝나지 않으면 None (그 전송은 걸어 둔 채로).
+    pub fn next_timeout<R>(&mut self, timeout: std::time::Duration, f: impl FnOnce(&[u8]) -> R) -> io::Result<Option<R>> {
+        self.wait(timeout.as_millis().clamp(1, u32::MAX as u128 - 1) as u32, f)
+    }
+
+    fn wait<R>(&mut self, ms: u32, f: impl FnOnce(&[u8]) -> R) -> io::Result<Option<R>> {
         let i = self.next;
         let mut done = 0u32;
         {
             let s = &self.slots[i];
             // SAFETY: 우리가 걸어 둔 전송을 기다립니다.
             unsafe {
-                WaitForSingleObject(s.ov.hEvent, INFINITE);
+                if WaitForSingleObject(s.ov.hEvent, ms) == WAIT_TIMEOUT {
+                    return Ok(None);
+                }
                 WinUsb_GetOverlappedResult(self.usb.winusb, &*s.ov, &mut done, true).map_err(|e| io::Error::other(format!("bulk IN: {e}")))?;
             }
         }
         let r = f(&self.slots[i].buf[..done as usize]);
         self.submit(i)?;
         self.next = (i + 1) % self.slots.len();
-        Ok(r)
+        Ok(Some(r))
     }
 }
 

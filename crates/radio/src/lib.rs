@@ -14,6 +14,7 @@ pub mod dm;
 mod generated;
 pub mod radio;
 pub mod rtl8822b;
+pub mod rtl8922a;
 pub mod usb;
 
 pub use radio::{Config, PhyStatus, Radio, RxFrame, TxFrame, TxRate};
