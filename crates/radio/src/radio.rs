@@ -78,6 +78,8 @@ pub struct Config {
     pub ampdu_density: u8,
     /// RTL8912AU: 송신 출력 한도를 정할 나라 (ISO 3166 두 글자). 없으면 세계 공통 한도.
     pub country: Option<[u8; 2]>,
+    /// RTL8912AU: USB 전송 하나에 담는 프레임 한도 ([rtl8922a::Rtl8922a::send_many]).
+    pub usb_tx_agg: rtl8922a::TxAgg,
 }
 
 impl Default for Config {
@@ -94,6 +96,7 @@ impl Default for Config {
             ampdu_max: 16,
             ampdu_density: 6,
             country: None,
+            usb_tx_agg: rtl8922a::TxAgg::new(16, 20 << 10),
         }
     }
 }
@@ -527,22 +530,21 @@ impl Radio {
     }
 
     fn send_rtw89(&self, c: &Rtl8922a, frames: &[TxFrame]) -> io::Result<usize> {
-        let mut sent = 0;
-        for f in frames {
-            if f.data.len() < 10 || f.data.len() > 11454 {
-                continue;
-            }
-            let mut t = rtl8922a::TxFrame::new(f.data, f.rate.hw_rate());
-            t.ampdu = f.ampdu;
-            t.ampdu_max = self.cfg.ampdu_max;
-            t.ampdu_density = self.cfg.ampdu_density;
-            t.no_ack = f.no_ack;
-            t.voice = f.voice;
-            t.retry = Some(self.cfg.retry_limit);
-            c.send(&t)?;
-            sent += 1;
-        }
-        Ok(sent)
+        let hw: Vec<rtl8922a::TxFrame> = frames
+            .iter()
+            .filter(|f| (10..=11454).contains(&f.data.len()))
+            .map(|f| {
+                let mut t = rtl8922a::TxFrame::new(f.data, f.rate.hw_rate());
+                t.ampdu = f.ampdu;
+                t.ampdu_max = self.cfg.ampdu_max;
+                t.ampdu_density = self.cfg.ampdu_density;
+                t.no_ack = f.no_ack;
+                t.voice = f.voice;
+                t.retry = Some(self.cfg.retry_limit);
+                t
+            })
+            .collect();
+        c.send_many(&hw, &self.cfg.usb_tx_agg)
     }
 
     fn ep_for(&self, chip: &Rtl8822b, f: &TxFrame) -> u8 {

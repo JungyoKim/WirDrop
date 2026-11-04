@@ -94,8 +94,9 @@ Windows가 씁니다.
 <details>
 <summary><b>얼마나 빠른가요?</b></summary>
 
-1 m 거리의 iPhone과 BE6500UA로 687 MB 영상을 PC로 받는 데 약 22초(31 MB/s), 보내는 데 약
-28초(24 MB/s)가 걸립니다. T3U Nano로는 80 MB 영상이 양방향 모두 약 3초(22~26 MB/s)입니다.
+BE6500UA는 양방향 모두 Wi-Fi 6로 주고받습니다. 1 m 거리의 iPhone과 1.26 GB 영상을 PC로 받는 데
+약 32초(40 MB/s), 보내는 데 약 27초(47 MB/s)가 걸립니다. T3U Nano로는 80 MB 영상이 양방향 모두
+약 3초(22~26 MB/s)입니다.
 [동작 원리](../docs/ko/how-it-works.md#속도)를 보세요.
 </details>
 

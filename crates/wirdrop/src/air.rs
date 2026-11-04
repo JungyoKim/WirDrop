@@ -55,7 +55,9 @@ impl UdpAir {
                 let _ = rx_in.try_send(frame);
             }
         })?;
-        sock.set_nonblocking(true)?;
+        // 소켓은 막히는 모드로 둡니다: try_clone은 같은 소켓을 가리켜 non-blocking 설정도 함께
+        // 바뀌므로, 켜면 위 스레드의 recv_from이 기다리지 않고 헛돌며 CPU 코어 하나를 다 씁니다.
+        // 루프백 UDP 보내기는 막히지 않습니다 (받는 쪽이 가득 차면 거기서 버립니다).
         Ok(UdpAir { rx, sock, peer, stop })
     }
 }

@@ -94,9 +94,10 @@ Windows.
 <details>
 <summary><b>How fast is it?</b></summary>
 
-With the iPhone a metre away, the BE6500UA moves a 687 MB video to the PC in about 22 seconds
-(31 MB/s) and back in about 28 seconds (24 MB/s). The T3U Nano sends an 80 MB video in about
-3 seconds either way (22 to 26 MB/s). See [How it works](docs/how-it-works.md#speed).
+With the iPhone a metre away, the BE6500UA talks Wi-Fi 6 both ways and moves a 1.26 GB video to
+the PC in about 32 seconds (40 MB/s) and back in about 27 seconds (47 MB/s). The T3U Nano sends
+an 80 MB video in about 3 seconds either way (22 to 26 MB/s). See
+[How it works](docs/how-it-works.md#speed).
 </details>
 
 <details>

@@ -139,6 +139,8 @@ pub struct Config {
     pub country: [u8; 2],
     /// Infrastructure channel announced in Data Path State (None: no infrastructure).
     pub infra_channel: Option<u8>,
+    /// Data Path State extension flags ([crate::tlv::ext_flag]).
+    pub ext_flags: u16,
     /// Ask Apple peers for a Block Ack session on TID 0 for what we send them, and send them all
     /// unicast as QoS data. For radios that aggregate and take the Block Ack in hardware (usbfwd
     /// with USBFWD_TX_BA).
@@ -166,6 +168,7 @@ impl Config {
             vht_caps: None,
             country: *b"X0",
             infra_channel: None,
+            ext_flags: 0,
             tx_addba: false,
         }
     }
@@ -836,6 +839,7 @@ impl Node {
             vht: self.cfg.vht_caps,
             country: self.cfg.country,
             infra_channel: self.cfg.infra_channel,
+            ext_flags: self.cfg.ext_flags,
         };
         let mif = subtype == frame::subtype::MIF;
         let bytes = frame::action_frame(self.cfg.addr, seq, subtype, now.micros() as u32, |out| {

@@ -28,7 +28,7 @@ pub use dm::DigReport;
 pub use generated::regs;
 use generated::regs::*;
 pub use rfk::RfkResult;
-pub use tx::{BACAM_STATIC_NUM, HwRate, TX_DESC_SIZE, TxFrame};
+pub use tx::{BACAM_STATIC_NUM, HwRate, TX_DESC_SIZE, TxAgg, TxFrame};
 pub use txpwr::TxPowerTables;
 
 /// Realtek의 RTL8922A 펌웨어 (linux-firmware rtw89/rtw8922a_fw-4.bin, 수정 없이 재배포 가능).

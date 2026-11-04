@@ -62,6 +62,8 @@ impl UsbfwdOptions {
             reorder_ms: None,
             ack_quiet_us: None,
             ack_hold_us: None,
+            // 32: iPhone은 64까지 받겠다고 하지만, RTL8912AU에서 64로 묶으면 TCP 손실이 다시 늘어
+            // 1.26 GB가 50.2 MB/s에서 24.0 MB/s로 떨어졌습니다.
             ampdu: Some("0/32/6".into()),
             usb_id: None,
             radio_port: 7770,

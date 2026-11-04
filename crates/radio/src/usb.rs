@@ -29,6 +29,9 @@ const REQ: u8 = 0x05;
 const READ: u8 = 0xc0;
 const WRITE: u8 = 0x40;
 
+/// [Usb::bulk_write_queued]가 동시에 걸어 두는 벌크 OUT 전송 수.
+const OUT_SLOTS: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbId {
     pub vid: u16,
@@ -57,6 +60,8 @@ pub struct Usb {
     /// 제어 전송은 아래의 8822B 특이점 때문에 레지스터 접근 하나를 두 단계로 나릅니다. 한 번에
     /// 하나씩.
     ctrl: Mutex<()>,
+    /// 끝나기를 기다리지 않는 벌크 OUT 전송들 ([Usb::bulk_write_queued]). 처음 쓸 때 만듭니다.
+    out: Mutex<Option<Writer>>,
 }
 
 // SAFETY: WinUSB 핸들은 어느 스레드에서든 쓸 수 있습니다. 서로 다른 파이프의 호출은 겹쳐도 되고,
@@ -186,6 +191,7 @@ impl Usb {
                 high_speed: true,
                 max_packet: 0,
                 ctrl: Mutex::new(()),
+                out: Mutex::new(None),
             };
             let mut desc = USB_INTERFACE_DESCRIPTOR::default();
             WinUsb_QueryInterfaceSettings(winusb, 0, &mut desc).map_err(io::Error::other)?;
@@ -304,6 +310,50 @@ impl Usb {
         Ok(())
     }
 
+    /// 벌크 OUT 전송을 걸고 끝나기를 기다리지 않습니다: 전송마다 USB 왕복을 기다리면 그것이
+    /// 송신 속도의 한계가 되므로, rtw89가 URB를 여럿 띄우듯 [OUT_SLOTS]개까지 걸어 둡니다. 같은
+    /// 파이프의 전송은 건 순서대로 끝납니다. 자리가 모자라면 가장 오래된 전송을 기다리고, 그 전송이
+    /// 실패했으면 여기서 오류를 돌려줍니다.
+    pub fn bulk_write_queued(&self, ep: u8, data: Vec<u8>) -> io::Result<()> {
+        let mut g = self.out.lock().unwrap();
+        let w = match g.as_mut() {
+            Some(w) => w,
+            None => g.insert(Writer::new()?),
+        };
+        let i = w.next;
+        w.next = (i + 1) % w.slots.len();
+        let s = &mut w.slots[i];
+        let before = if s.busy { self.finish(s) } else { Ok(()) };
+        s.buf = data;
+        s.ep = ep;
+        let event = s.ov.hEvent;
+        *s.ov = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        // SAFETY: 버퍼와 OVERLAPPED는 전송이 끝날 때까지 (자리가 소유하고 박스에 담겨) 제자리에
+        // 있습니다: 자리를 다시 쓰거나 Usb를 버리기 전에 [Usb::finish]로 기다립니다.
+        match unsafe { WinUsb_WritePipe(self.winusb, ep, &s.buf, None, Some(&*s.ov)) } {
+            Ok(()) => s.busy = true,
+            Err(e) if e.code() == ERROR_IO_PENDING.to_hresult() => s.busy = true,
+            Err(e) => return Err(io::Error::other(format!("bulk OUT 0x{ep:02x}: {e}"))),
+        }
+        before
+    }
+
+    /// 자리의 전송이 끝나기를 기다립니다.
+    fn finish(&self, s: &mut OutSlot) -> io::Result<()> {
+        s.busy = false;
+        let mut done = 0u32;
+        // SAFETY: 우리가 건 전송을 기다립니다.
+        unsafe { WinUsb_GetOverlappedResult(self.winusb, &*s.ov, &mut done, true) }
+            .map_err(|e| io::Error::other(format!("bulk OUT 0x{:02x}: {e}", s.ep)))?;
+        if done as usize != s.buf.len() {
+            return Err(io::Error::other(format!("bulk OUT 0x{:02x}: {done} of {} bytes", s.ep, s.buf.len())));
+        }
+        Ok(())
+    }
+
     /// 기다리는 읽기를 멈춥니다 (읽는 스레드가 끝날 수 있게).
     pub fn abort_in(&self) {
         // SAFETY: 우리 핸들에 대한 평범한 호출.
@@ -334,11 +384,55 @@ impl Usb {
 
 impl Drop for Usb {
     fn drop(&mut self) {
+        // 걸어 둔 벌크 OUT 전송이 끝나야 그 버퍼를 놓고 핸들을 닫을 수 있습니다.
+        if let Some(mut w) = self.out.get_mut().unwrap().take() {
+            for s in &mut w.slots {
+                if s.busy {
+                    let _ = self.finish(s);
+                }
+                // SAFETY: Writer::new가 만든 이벤트.
+                let _ = unsafe { CloseHandle(s.ov.hEvent) };
+            }
+        }
         // SAFETY: 두 핸들 모두 우리 것입니다.
         unsafe {
             let _ = WinUsb_Free(self.winusb);
             let _ = CloseHandle(self.file);
         }
+    }
+}
+
+/// 끝나기를 기다리지 않는 벌크 OUT 전송 하나의 자리.
+struct OutSlot {
+    ov: Box<OVERLAPPED>,
+    buf: Vec<u8>,
+    ep: u8,
+    busy: bool,
+}
+
+/// 차례로 돌려 쓰는 [OutSlot]들.
+struct Writer {
+    slots: Vec<OutSlot>,
+    next: usize,
+}
+
+impl Writer {
+    fn new() -> io::Result<Writer> {
+        let mut slots = Vec::with_capacity(OUT_SLOTS);
+        for _ in 0..OUT_SLOTS {
+            // SAFETY: 자리마다 수동 리셋 이벤트 하나. Usb의 Drop에서 닫습니다.
+            let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(io::Error::other)?;
+            slots.push(OutSlot {
+                ov: Box::new(OVERLAPPED {
+                    hEvent: event,
+                    ..Default::default()
+                }),
+                buf: Vec::new(),
+                ep: 0,
+                busy: false,
+            });
+        }
+        Ok(Writer { slots, next: 0 })
     }
 }
 

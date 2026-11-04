@@ -15,18 +15,24 @@
 //!     USBFWD_VID / USBFWD_PID       어댑터 (기본: 꽂혀 있는 것, RTL8912AU 0bda:8912가 먼저, 아니면
 //!                                   2357:012e TP-Link Archer T3U Nano)
 //!     USBFWD_COUNTRY=KR             RTL8912AU 송신 출력 한도의 나라 (ISO 3166 두 글자)
-//!     USBFWD_RETRY_LIMIT            유니캐스트 프레임의 하드웨어 재전송 횟수 (기본 8)
+//!     USBFWD_RETRY_LIMIT            유니캐스트 프레임의 하드웨어 재전송 횟수 (기본 8, RTL8912AU 32)
 //!     USBFWD_TX_POWER               모든 속도에 쓰는 고정 TXAGC 지수
 //!     USBFWD_DATA_VHT=nss/mcs[/sgi[/ldpc]]  채널 전체 폭을 쓰는 이 VHT 속도로 유니캐스트 데이터
 //!     USBFWD_FAR_VHT=...            USBFWD_FAR_RSSI보다 약하게 들리는 상대에게 쓰는 속도
 //!                                   (rtw88의 0-100 척도, 기본 50: -50 dBm); 기본 2/5
 //!                                   (더 약한 상대는 더 느린 속도: WEAKER 참고)
 //!     USBFWD_ACK_VHT=...            순수 TCP ACK의 속도 (기본: 데이터 속도)
+//!     USBFWD_DATA_HE=nss/mcs        RTL8912AU: 신호가 센 상대에게 유니캐스트 데이터를 이 HE(Wi-Fi 6)
+//!                                   속도로 (MCS 0-11, 0.8 us 보호 구간, LDPC; 기본 2/11, 0 = 끔).
+//!                                   약한 상대와 순수 TCP ACK는 위 VHT 속도 그대로
 //!     USBFWD_TX_BA=1                owly의 Block Ack 합의를 따라 상대에게 A-MPDU로 보냄
 //!     USBFWD_AMPDU=tid/max[/density] A-MPDU 하나에 최대 이만큼의 MPDU (기본 16),
 //!                                   802.11 밀도 코드 간격 (기본 6, 8 us)
+//!     USBFWD_TX_AGG=frames[/kb]     RTL8912AU: USB 전송 하나에 담는 프레임 수와 KB (기본 16/20,
+//!                                   1 = 프레임마다 전송 하나)
 //!     USBFWD_BFEE=1                 보내는 상대의 채널 측정에 답함 (SU 빔포밍 수신)
-//!     USBFWD_REORDER_MS (80), USBFWD_ACK_QUIET_US (200), USBFWD_ACK_HOLD_US (2000)
+//!     USBFWD_REORDER_MS (80), USBFWD_ACK_QUIET_US (200, RTL8912AU 100),
+//!     USBFWD_ACK_HOLD_US (2000, RTL8912AU 500)
 //!     USBFWD_IGI                    동적 이득 대신 고정 초기 이득
 //!     USBFWD_EDCCA=1                에너지 감지 문턱이 이득을 따름 (rtw88의 적응 모드); 기본 끔
 //!     USBFWD_PWRTRACK=1             온도에 맞춘 송신 출력 추적 (기본 끔)
@@ -943,11 +949,12 @@ impl Relay {
         }
     }
 
-    /// 우리에게 온 유니캐스트 프레임 하나: 1초 창 안에서 8개 이상 가운데 4분의 3 넘게 재전송이거나,
-    /// 서로 다른 프레임 셋 이상이 저마다 다섯 번 넘게 오면 상대가 우리 응답을 받지 못하는 것으로
-    /// 봅니다 (정상일 때 재전송은 몇 %). 다시 올린 직후에는 상대가 그동안 쌓인 프레임을 재전송으로
-    /// 보내므로 잠시 보지 않고 (run의 다시 올리기), 먼 상대는 약한 신호 탓에 우리 ACK을 놓치므로 신호가
-    /// 약한 상대(RSSI 40 아래)는 보지 않습니다.
+    /// 우리에게 온 유니캐스트 프레임 하나: 1초 창 안에서 서로 다른 프레임 셋 이상이 저마다 다섯 번
+    /// 넘게 오면 상대가 우리 응답을 받지 못하는 것으로 봅니다. 재전송 비율만으로는 보지 않습니다:
+    /// 전송 끝 무렵에는 Block Ack이 빠뜨린 MPDU의 재전송(한두 번이면 닿음)이 남은 프레임의 대부분이
+    /// 될 수 있습니다. 다시 올린 직후에는 상대가 그동안 쌓인 프레임을 재전송으로 보내므로 잠시 보지
+    /// 않고 (run의 다시 올리기), 먼 상대는 약한 신호 탓에 우리 ACK을 놓치므로 신호가 약한 상대(RSSI 40
+    /// 아래)는 보지 않습니다.
     fn check_answered(&self, f: &[u8]) {
         if self.answers_paused.lock().unwrap().is_some_and(|t| Instant::now() < t) {
             return;
@@ -974,7 +981,7 @@ impl Relay {
         } else {
             0
         };
-        if repeated >= 3 || (frames >= 16 && retries * 5 > frames * 4) {
+        if repeated >= 3 {
             *a = AnswerWindow::new();
             log!(
                 "the adapter isn't answering: {retries} of {frames} frames came again ({repeated} of them 5 times or more), last from {}; bringing it up again",
@@ -1405,9 +1412,22 @@ fn run() -> io::Result<()> {
     let vht = parse_vht("USBFWD_DATA_VHT");
     let ack_vht = parse_vht("USBFWD_ACK_VHT").or(vht);
     let far_vht = parse_vht("USBFWD_FAR_VHT").unwrap_or(Vht::new(2, 5));
+    // RTL8912AU는 신호가 센 상대에게 데이터를 HE 2SS MCS11로: 1.26 GB 영상의 PC→iPhone이 VHT
+    // 2SS MCS7의 35.8 MB/s에서 50.2 MB/s로 (Block Ack이 빠뜨린 MPDU 없음).
+    let he_data = match std::env::var("USBFWD_DATA_HE") {
+        Ok(s) => {
+            let p: Vec<u8> = s.split('/').filter_map(|x| x.trim().parse().ok()).collect();
+            (p.len() >= 2 && (1..=2).contains(&p[0]) && p[1] <= 11).then(|| (p[0], p[1]))
+        }
+        Err(_) => Some((2, 11)),
+    }
+    .filter(|_| rtw89);
     let reorder_ms = env_num::<u64>("USBFWD_REORDER_MS").unwrap_or(80);
-    let ack_quiet_us = env_num::<i64>("USBFWD_ACK_QUIET_US").unwrap_or(200).max(0);
-    let ack_hold_us = env_num::<u64>("USBFWD_ACK_HOLD_US").unwrap_or(2000).max(100);
+    // 순수 TCP ACK를 상대가 이만큼 조용할 때까지, 길어야 hold만큼 모읍니다. RTL8912AU에 HE로 보내는
+    // iPhone은 묶음을 빨리 끝내고 우리 ACK를 기다리므로 짧게: 1.26 GB 영상에서 100/500 us가
+    // 39.8 MB/s, 150/500이 36.5, 50/300이 23.3, T3U의 200/2000은 ACK를 기다리는 틈이 늘어 느렸습니다.
+    let ack_quiet_us = env_num::<i64>("USBFWD_ACK_QUIET_US").unwrap_or(if rtw89 { 100 } else { 200 }).max(0);
+    let ack_hold_us = env_num::<u64>("USBFWD_ACK_HOLD_US").unwrap_or(if rtw89 { 500 } else { 2000 }).max(100);
     let tx_ba = env_num::<u32>("USBFWD_TX_BA").unwrap_or(0) != 0;
     let ack_vo = env_num::<u32>("USBFWD_ACK_VO").unwrap_or(0) != 0;
     let bfee = env_num::<u32>("USBFWD_BFEE").unwrap_or(0) != 0;
@@ -1428,17 +1448,26 @@ fn run() -> io::Result<()> {
             &[a, b] if a.is_ascii_alphabetic() && b.is_ascii_alphabetic() => Some([a, b]),
             _ => None,
         });
+    // RTL8912AU: USB 전송 하나에 담는 프레임 수/KB (1이면 하나씩).
+    let agg_spec = std::env::var("USBFWD_TX_AGG").unwrap_or_default();
+    let agg_field = |i: usize| agg_spec.split('/').nth(i).and_then(|m| m.trim().parse::<usize>().ok());
+    let usb_tx_agg = wirdrop_radio::rtl8922a::TxAgg::new(agg_field(0).unwrap_or(16), agg_field(1).unwrap_or(20) << 10);
     let cfg = Config {
         usb,
         channel,
         bw_mhz: bw,
         mac: ours,
         tx_power: env_num("USBFWD_TX_POWER"),
-        retry_limit: env_num("USBFWD_RETRY_LIMIT").unwrap_or(8),
+        // RTL8912AU: 32. AWDL 상대는 슬롯 사이에 수십 ms씩 채널을 비우는데, 그때 칩에 쌓인
+        // 프레임이 8번 재전송을 금방 다 쓰고 버려져 TCP가 속도를 반으로 줄였습니다 (1.26 GB를
+        // iPhone에 보내며 빠른 재전송 70여 번, 23.2 MB/s). 32번이면 백오프가 길어져 상대가 돌아올
+        // 때까지 버티고 (빠른 재전송 1번), 같은 설정에서 35.8 MB/s.
+        retry_limit: env_num("USBFWD_RETRY_LIMIT").unwrap_or(if rtw89 { 32 } else { 8 }),
         igi: env_num("USBFWD_IGI"),
         ampdu_max,
         ampdu_density,
         country,
+        usb_tx_agg,
         ..Config::default()
     };
     let mut radio = Radio::open(cfg.clone())?;
@@ -1490,7 +1519,15 @@ fn run() -> io::Result<()> {
         ack_quiet_us,
     };
     if tx_ba {
-        log!("Block Ack mode on: A-MPDU of up to {ampdu_max} MPDUs to peers that agree, USB TX aggregation 3");
+        if radio.rtw89().is_some() {
+            log!(
+                "Block Ack mode on: A-MPDU of up to {ampdu_max} MPDUs to peers that agree, USB transfers of up to {} frames / {} KB",
+                usb_tx_agg.frames,
+                usb_tx_agg.bytes >> 10
+            );
+        } else {
+            log!("Block Ack mode on: A-MPDU of up to {ampdu_max} MPDUs to peers that agree, USB TX aggregation 3");
+        }
     }
     // 백오프 없는 AIFSN 2: 최선 노력 송신자는 AIFSN 3에 백오프까지 기다립니다.
     let voice_access = |radio: &Radio| {
@@ -1507,7 +1544,7 @@ fn run() -> io::Result<()> {
         "ch {channel}/{bw} MHz, mac {}, ack responder armed, retries {}, data {}, ack {}, far {}, reorder {reorder_ms} ms, ack pacing {ack_quiet_us}/{ack_hold_us} us, UDP 127.0.0.1:{port} <-> {peer}",
         mac_str(&ours),
         radio.cfg.retry_limit,
-        fmt_vht(vht),
+        he_data.map_or_else(|| fmt_vht(vht), |(n, m)| format!("HE {n}/{m}")),
         fmt_vht(ack_vht),
         far_vht.name()
     );
@@ -1537,7 +1574,7 @@ fn run() -> io::Result<()> {
             });
             s.spawn(|| watchdog(&radio, &relay));
             raise_thread();
-            tx_loop(&radio, &relay, stop_file.clone(), bw_code, vht, ack_vht, ack_hold_us);
+            tx_loop(&radio, &relay, stop_file.clone(), bw_code, vht, ack_vht, he_data, ack_hold_us);
             relay.stop.store(true, Relaxed);
             radio.abort_rx();
             let _ = rx_thread.join();
@@ -1666,9 +1703,10 @@ fn tx_loop(
     bw_code: u8,
     vht: Option<Vht>,
     ack_vht: Option<Vht>,
+    he_data: Option<(u8, u8)>,
     ack_hold_us: u64,
 ) {
-    const BATCH: usize = 16;
+    const BATCH: usize = 32;
     let mut buf = vec![0u8; 16384];
     // 프레임, 속도, A-MPDU, ACK 없음, 송신 보고 번호
     type Queued = (Vec<u8>, TxRate, bool, bool, Option<u8>, bool);
@@ -1734,6 +1772,11 @@ fn tx_loop(
         let use_vht = v.filter(|_| unicast_data).map(|v| relay.rate_for(&f[4..10], v));
         let agg = relay.prepare_tx(&mut d) && use_vht.is_some();
         let r = match use_vht {
+            // 낮춘 속도를 받지 않은(신호가 센) 상대에게 가는 데이터는 HE로.
+            Some(rv) if !pure && v.is_some_and(|v| (v.nss, v.mcs) == (rv.nss, rv.mcs)) && he_data.is_some() => {
+                let (nss, mcs) = he_data.unwrap_or((2, 7));
+                TxRate::he(nss, mcs, bw_code, true, true)
+            }
             Some(v) => TxRate::vht(v.nss, v.mcs, bw_code, v.sgi, v.ldpc),
             None => TxRate::legacy(rate),
         };

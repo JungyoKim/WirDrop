@@ -214,6 +214,11 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
     if let Some(country) = &cfg.country {
         link_cfg.usbfwd.env.push(("USBFWD_COUNTRY".into(), country.clone()));
     }
+    // BE6500UA(RTL8912AU)는 Wi-Fi 6(HE)을 받으므로 iPhone에 알립니다 (usbfwd도 이것을 먼저 고릅니다).
+    if crate::win::find_adapter().is_some_and(|a| a.contains("RTL8912AU")) {
+        link_cfg.tuning.awdl_ext_flags |= wirdrop::owly_awdl::tlv::ext_flag::HE;
+    }
+    tracing::info!("AWDL extension flags 0x{:04x}", link_cfg.tuning.awdl_ext_flags);
     let ports: Vec<u16> = (0..members.len() as u16).map(|i| airdrop::PORT + i).collect();
     // netsh는 1초 가까이 걸리니, 더 오래 걸리는 어댑터와 나란히 합니다.
     let rules = if firewall.as_ref().is_some_and(|(p, _)| *p == ports) {

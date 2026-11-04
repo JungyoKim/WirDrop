@@ -46,6 +46,8 @@ pub mod fc {
     pub const MORE_FRAGMENTS: u16 = 0x0400;
     pub const RETRY: u16 = 0x0800;
     pub const PROTECTED: u16 = 0x4000;
+    /// In a QoS data or management frame: an HT Control field follows the header (+HTC).
+    pub const ORDER: u16 = 0x8000;
 }
 
 /// The 802.11 MAC header's length, without QoS control.
@@ -162,8 +164,10 @@ pub fn parse(bytes: &[u8]) -> Result<Received<'_>, Error> {
         return Ok(Received::Other);
     }
     let body = b.rest(HEADER_LEN)?;
+    // +HTC: HE peers may add an HT Control field, after QoS control in QoS data.
+    let htc = if fc & fc::ORDER != 0 { 4 } else { 0 };
     match fc & fc::TYPE_SUBTYPE {
-        fc::ACTION => action(header, body),
+        fc::ACTION => action(header, body.get(htc..).ok_or(Error::Truncated)?),
         t @ (fc::DATA | fc::QOS_DATA) => {
             // AWDL-1: AWDL data is between peers on AWDL's BSSID, neither
             // to nor from a distribution system.
@@ -175,7 +179,7 @@ pub fn parse(bytes: &[u8]) -> Result<Received<'_>, Error> {
                 Ok(Received::Data {
                     header,
                     amsdu: qos & 0x0080 != 0,
-                    body: &body[2..],
+                    body: body.get(2 + htc..).ok_or(Error::Truncated)?,
                 })
             } else {
                 Ok(Received::Data {
@@ -449,6 +453,21 @@ mod tests {
 
     const A: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x01]);
     const B: MacAddr = MacAddr([0x86, 0x08, 0x04, 0x8a, 0x2b, 0xf4]);
+
+    // An HE peer's QoS data may carry an HT Control field (+HTC) after QoS control.
+    #[test]
+    fn qos_data_with_ht_control_reads_the_same_packet() {
+        let packet = [0x60, 0, 0, 0, 0, 0, 0x3b, 0x40];
+        let plain = qos_data_frame(A, B, 5, 7, &packet);
+        let mut htc = plain.clone();
+        htc[1] |= 0x80;
+        htc.splice(HEADER_LEN + 2..HEADER_LEN + 2, [0x03, 0x00, 0x00, 0x00]);
+        let body = |f: &[u8]| match parse(f).unwrap() {
+            Received::Data { body, .. } => body.to_vec(),
+            _ => panic!("not data"),
+        };
+        assert_eq!(body(&htc), body(&plain));
+    }
 
     // spec: AWDL-13, T-AWDL-2
     #[test]

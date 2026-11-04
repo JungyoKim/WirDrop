@@ -66,12 +66,13 @@ lists the PC once: as one of its own devices for its owner, by name for everyone
 
 ## Speed
 
-A 687 MB video between the PC and an iPhone a metre away, with the BE6500UA:
+A 1.26 GB video between the PC and an iPhone 17 Pro a metre away, with the BE6500UA. Both ways
+use Wi-Fi 6 (HE, two streams, 80 MHz):
 
 | Direction | Time |
 |---|---|
-| iPhone → PC | 22.3 s (30.8 MB/s) |
-| PC → iPhone | 28.2 s after the iPhone accepts (24.3 MB/s) |
+| iPhone → PC | 31.6 s (39.8 MB/s) |
+| PC → iPhone | 26.8 s after the iPhone accepts (46.8 MB/s) |
 
 An 80 MB (79.75 MB) video with the T3U Nano:
 
@@ -80,7 +81,8 @@ An 80 MB (79.75 MB) video with the T3U Nano:
 | iPhone → PC | 3.1 to 3.6 s (22 to 26 MB/s) | 22 s |
 | PC → iPhone | 3.1 to 3.3 s after the iPhone accepts (24 to 26 MB/s) | 14.1 s |
 
-What limits it now is the iPhone, which spends only 65 to 77% of a transfer on the shared channel.
+What limits it now is the shared channel. The iPhone spends only part of a transfer on it (65 to
+90% in our measurements), and nothing moves while it's away.
 
 ## Known limits
 

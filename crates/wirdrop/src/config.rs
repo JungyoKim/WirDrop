@@ -48,6 +48,9 @@ pub struct Tuning {
     /// VHT 능력에 SU 빔포밍 수신(시공간 스트림 2)을 알리고, 상대의 채널 측정에 무선이 하드웨어로
     /// 답하게 해(usbfwd USBFWD_BFEE) 안테나 2개인 상대가 우리 쪽으로 빔포밍하게 합니다.
     pub beamformee: bool,
+    /// Data Path State TLV의 확장 플래그 (owly_awdl::tlv::ext_flag). HE면 iPhone이 우리에게
+    /// Wi-Fi 6(HE)으로 보냅니다: HE를 받는 무선(RTL8912AU)에서만 켭니다.
+    pub awdl_ext_flags: u16,
 }
 
 impl Tuning {
@@ -67,6 +70,7 @@ impl Tuning {
             tx_ampdu: true,
             rx_stbc: false,
             beamformee: false,
+            awdl_ext_flags: 0,
         }
     }
 }
@@ -119,6 +123,7 @@ pub fn awdl_config(mac: [u8; 6], name: &str, channel: u8, tuning: &Tuning) -> io
     c.rssi_threshold = tuning.rssi_threshold;
     c.country = tuning.country;
     c.tx_addba = tuning.tx_ampdu;
+    c.ext_flags = tuning.awdl_ext_flags;
     Ok(c)
 }
 

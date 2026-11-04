@@ -102,6 +102,30 @@ impl HwRate {
     }
 }
 
+/// USB 전송 하나에 담는 한도 ([Rtl8922a::send_many]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxAgg {
+    /// 프레임 수 (서술자 칸은 127까지).
+    pub frames: usize,
+    /// 서술자를 포함한 바이트.
+    pub bytes: usize,
+}
+
+impl TxAgg {
+    /// 전송 하나에 프레임 하나 (rtw89).
+    pub const OFF: TxAgg = TxAgg {
+        frames: 1,
+        bytes: usize::MAX,
+    };
+
+    pub fn new(frames: usize, bytes: usize) -> TxAgg {
+        TxAgg {
+            frames: frames.clamp(1, 127),
+            bytes: bytes.max(TX_DESC_SIZE + 2304),
+        }
+    }
+}
+
 /// 내보낼 프레임 (802.11 머리말부터, FCS 없이).
 #[derive(Debug, Clone, Copy)]
 pub struct TxFrame<'a> {
@@ -438,17 +462,52 @@ impl Rtl8922a {
         put_le(d, &w);
     }
 
-    /// 프레임 하나를 보냅니다 (USB 전송 하나에 하나, rtw89_usb_ops_tx_write).
+    /// 프레임 하나를 보냅니다 (USB 전송 하나에 하나, rtw89_usb_ops_tx_write). 전송이 끝나기를
+    /// 기다리지 않습니다 ([Usb::bulk_write_queued]).
     pub fn send(&self, f: &TxFrame) -> io::Result<()> {
-        if f.data.len() < 10 {
-            return Err(io::Error::other("frame too short"));
+        self.send_many(std::slice::from_ref(f), &TxAgg::OFF).map(drop)
+    }
+
+    /// 프레임들을 보내며, 같은 벌크 파이프로 가는 이웃 프레임은 USB 전송 하나에 담습니다. 칩은
+    /// USB 전송마다 고정된 처리 시간(약 57 us)이 들어, 프레임마다 전송 하나면 초당 약 17,600
+    /// 프레임(24 MB/s)이 송신의 한계였습니다. 비동기 전송을 16개까지 걸어 두어도 같았습니다.
+    /// Realtek 공식 Windows 드라이버처럼 서술자+프레임을 8바이트 경계에 이어 붙이고 첫 서술자에
+    /// 담은 수를 적습니다 (BE_TXD_BODY1_DMA_TXAGG_NUM). 짧은 프레임은 건너뜁니다. 나간 수를
+    /// 돌려줍니다.
+    pub fn send_many(&self, frames: &[TxFrame], agg: &TxAgg) -> io::Result<usize> {
+        let mut sent = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        let (mut ep, mut n) = (0u8, 0usize);
+        for f in frames.iter().filter(|f| f.data.len() >= 10) {
+            let data = f.data[0] & 0x0c == 0x08;
+            let fep = self.usb.bulk_out[if data { BULKOUT_ACH0 } else { BULKOUT_B0MG }];
+            let at = buf.len().next_multiple_of(8);
+            if n > 0 && (fep != ep || n >= agg.frames || at + TX_DESC_SIZE + f.data.len() > agg.bytes) {
+                sent += self.flush_agg(ep, &mut buf, n)?;
+                n = 0;
+            }
+            let at = buf.len().next_multiple_of(8);
+            buf.resize(at + TX_DESC_SIZE, 0);
+            self.fill_desc(&mut buf[at..at + TX_DESC_SIZE], f);
+            buf.extend_from_slice(f.data);
+            ep = fep;
+            n += 1;
         }
-        let mut buf = vec![0u8; TX_DESC_SIZE + f.data.len()];
-        self.fill_desc(&mut buf[..TX_DESC_SIZE], f);
-        buf[TX_DESC_SIZE..].copy_from_slice(f.data);
-        let data = f.data[0] & 0x0c == 0x08;
-        let ep = self.usb.bulk_out[if data { BULKOUT_ACH0 } else { BULKOUT_B0MG }];
-        self.usb.bulk_write(ep, &buf)
+        if n > 0 {
+            sent += self.flush_agg(ep, &mut buf, n)?;
+        }
+        Ok(sent)
+    }
+
+    /// 모은 n개를 USB 전송 하나로 내보냅니다.
+    fn flush_agg(&self, ep: u8, buf: &mut Vec<u8>, n: usize) -> io::Result<usize> {
+        if n > 1 {
+            let w1 = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+            let w1 = (w1 & !BE_TXD_BODY1_DMA_TXAGG_NUM) | put(0, BE_TXD_BODY1_DMA_TXAGG_NUM, n as u32);
+            buf[4..8].copy_from_slice(&w1.to_le_bytes());
+        }
+        self.usb.bulk_write_queued(ep, std::mem::take(buf))?;
+        Ok(n)
     }
 
     /// 음성 큐의 채널 접근 (rtw89_fw_h2c_set_edca): 매체가 aifs_us만큼 비면 2^ecw_min - 1 슬롯의

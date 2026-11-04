@@ -38,6 +38,13 @@ pub mod devclass {
 /// The AWDL version a node announces: 3.4, as legacy did.
 pub const VERSION: u8 = 0x34;
 
+/// Extension flags in the Data Path State TLV, after the AWDL address and the UMI. Only flags
+/// that add no fields after them are listed (Logtrigger ID, RLFC and Misc do).
+pub mod ext_flag {
+    /// The node receives HE (Wi-Fi 6) PPDUs: an iPhone then sends it HE.
+    pub const HE: u16 = 0x0100;
+}
+
 /// The longest host name kept from, or written to, an ARPA TLV.
 pub const NAME_MAX: usize = 64;
 
@@ -359,6 +366,8 @@ pub struct Own<'a> {
     /// Infrastructure channel to announce in Data Path State (flag 0x0001), as an
     /// associated Apple device does; None announces no infrastructure.
     pub infra_channel: Option<u8>,
+    /// Data Path State extension flags ([ext_flag]).
+    pub ext_flags: u16,
 }
 
 fn tlv(out: &mut Vec<u8>, kind: u8, value: impl FnOnce(&mut Vec<u8>)) {
@@ -475,7 +484,7 @@ pub fn put_data_path_state(out: &mut Vec<u8>, own: &Own) {
             v.le16(ch as u16);
         }
         v.mac(own.addr);
-        v.le16(0);
+        v.le16(own.ext_flags);
     });
 }
 
@@ -561,6 +570,7 @@ mod tests {
             vht: None,
             country: *b"X0",
             infra_channel: None,
+            ext_flags: 0,
         };
         let mut out = Vec::new();
         put_all(&mut out, &own, mif);

@@ -66,6 +66,7 @@ fn frame_from(
         vht: None,
         country: *b"X0",
         infra_channel: None,
+        ext_flags: 0,
     };
     frame::action_frame(mac, 1, kind, 0, |out| {
         tlv::put_all(out, &own, kind == subtype::MIF)
