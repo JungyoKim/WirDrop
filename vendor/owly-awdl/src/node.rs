@@ -968,12 +968,22 @@ impl Node {
                     .min(self.cfg.max_frame.saturating_sub(frame::HEADER_LEN + 2));
                 let mut len = frame::amsdu_subframe_len(batch[0].packet.data.len());
                 let mut rest = VecDeque::new();
+                // Only the packets that come next for this peer: once one doesn't fit, the batch is
+                // done. Picking a later, smaller one past it (a TCP stream's short tail segment)
+                // would reorder the stream; the peer then reports the packets it skipped as lost and
+                // the sender resends them all and halves its window.
+                let mut full = false;
                 while let Some(next) = items.pop_front() {
+                    if next.packet.dst != dst {
+                        rest.push_back(next);
+                        continue;
+                    }
                     let add = frame::amsdu_subframe_len(next.packet.data.len()) + 3;
-                    if next.packet.dst == dst && batch.len() < AMSDU_PACKETS && len + add <= limit {
+                    if !full && batch.len() < AMSDU_PACKETS && len + add <= limit {
                         len += add;
                         batch.push(next);
                     } else {
+                        full = true;
                         rest.push_back(next);
                     }
                 }

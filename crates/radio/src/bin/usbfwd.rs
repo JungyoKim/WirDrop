@@ -31,8 +31,13 @@
 //!     USBFWD_TX_AGG=frames[/kb]     RTL8912AU: USB 전송 하나에 담는 프레임 수와 KB (기본 16/20,
 //!                                   1 = 프레임마다 전송 하나)
 //!     USBFWD_BFEE=1                 보내는 상대의 채널 측정에 답함 (SU 빔포밍 수신)
-//!     USBFWD_REORDER_MS (80), USBFWD_ACK_QUIET_US (200, RTL8912AU 100),
-//!     USBFWD_ACK_HOLD_US (2000, RTL8912AU 500)
+//!     USBFWD_REORDER_MS (80), USBFWD_ACK_QUIET_US (200, RTL8912AU 300),
+//!     USBFWD_ACK_HOLD_US (2000, RTL8912AU 1500)
+//!     USBFWD_ACK_EOF_US             RTL8912AU: 상대의 PPDU가 끝나고 이만큼(us) 뒤 잡아 둔 TCP ACK를
+//!                                   내보냄 (기본 60, 0 = 안 봄): PPDU마다 ACK 프레임 하나
+//!     USBFWD_ACK_POLL=0             ACK를 잡아 두는 동안 잠들지 않고 지켜보기를 끔 (기본 켬)
+//!     USBFWD_TX_AMSDU=bytes         RTL8912AU: 호스트가 연달아 보낸 같은 상대의 데이터 프레임을
+//!                                   이 크기까지 A-MSDU 하나로 (기본 7935, 0 = 안 합침)
 //!     USBFWD_IGI                    동적 이득 대신 고정 초기 이득
 //!     USBFWD_EDCCA=1                에너지 감지 문턱이 이득을 따름 (rtw88의 적응 모드); 기본 끔
 //!     USBFWD_PWRTRACK=1             온도에 맞춘 송신 출력 추적 (기본 끔)
@@ -156,6 +161,8 @@ struct Stats {
     ndpa_other: AtomicU64,
     ppdu_frames: AtomicU64,
     ppdu_count: AtomicU64,
+    /// 끝을 안 PPDU (RTL8912AU의 PPDU 상태 보고).
+    ppdu_ends: AtomicU64,
     rpt_ampdu_ok: AtomicU64,
     rpt_ampdu_fail: AtomicU64,
     rpt_single_ok: AtomicU64,
@@ -164,6 +171,9 @@ struct Stats {
     ba_rx: AtomicU64,
     ba_rx_holes: AtomicU64,
     bar_sent: AtomicU64,
+    /// 호스트의 데이터 프레임을 합쳐 만든 A-MSDU와 그 안의 MSDU 수.
+    tx_amsdu: AtomicU64,
+    tx_amsdu_msdus: AtomicU64,
     rx_to_us_bytes: AtomicU64,
 }
 
@@ -278,6 +288,8 @@ struct Relay {
     peer: Mutex<Option<SocketAddr>>,
     last_rssi: AtomicI64,
     last_rx_ns: AtomicI64,
+    /// 마지막으로 PPDU가 끝난 것을 안 시각 (now_ns).
+    eof_ns: AtomicI64,
     stats: Stats,
     tx_ba: bool,
     /// 순수 TCP ACK를 음성 큐로 (USBFWD_ACK_VO).
@@ -543,6 +555,13 @@ impl Relay {
         }
     }
 
+    /// 이 상대와 Block Ack 합의가 열려 있고 그 안에서 A-MSDU를 받는지.
+    fn amsdu_ok(&self, dst: &[u8]) -> bool {
+        let mut t = self.ba.lock().unwrap();
+        let p = t.peer(dst);
+        p.up && p.amsdu
+    }
+
     /// 무선으로 가는 프레임에 번호를 매기고 A-MPDU에 실어도 되는지 말합니다.
     fn prepare_tx(&self, f: &mut [u8]) -> bool {
         let n = f.len();
@@ -712,6 +731,15 @@ impl Relay {
 
     fn on_rx(&self, p: &RxFrame) {
         let s = &self.stats;
+        if p.ampdu_end {
+            // 상대의 PPDU가 끝남: 잡아 둔 TCP ACK를 내보낼 때 (tx_loop).
+            self.eof_ns.store(now_ns(), Relaxed);
+            s.ppdu_ends.fetch_add(1, Relaxed);
+        }
+        if p.data.is_empty() {
+            // 끝만 알리는 표시.
+            return;
+        }
         s.rx_all.fetch_add(1, Relaxed);
         self.last_rx_ns.store(now_ns(), Relaxed);
         if self.prev_ppdu.swap(p.ppdu_cnt, Relaxed) != p.ppdu_cnt {
@@ -1018,7 +1046,14 @@ impl Relay {
                 g(&s.ro_bar)
             );
         }
-        log!("ack paced {} merged {}", g(&s.ack_paced), g(&s.ack_merged));
+        log!(
+            "ack paced {} merged {} | PPDU ends {} | host frames merged into {} A-MSDUs of {} MSDUs",
+            g(&s.ack_paced),
+            g(&s.ack_merged),
+            g(&s.ppdu_ends),
+            g(&s.tx_amsdu),
+            g(&s.tx_amsdu_msdus)
+        );
         {
             let pct = |v: &mut Vec<u32>| -> Option<(u32, u32, u32)> {
                 if v.len() < 20 {
@@ -1423,11 +1458,12 @@ fn run() -> io::Result<()> {
     }
     .filter(|_| rtw89);
     let reorder_ms = env_num::<u64>("USBFWD_REORDER_MS").unwrap_or(80);
-    // 순수 TCP ACK를 상대가 이만큼 조용할 때까지, 길어야 hold만큼 모읍니다. RTL8912AU에 HE로 보내는
-    // iPhone은 묶음을 빨리 끝내고 우리 ACK를 기다리므로 짧게: 1.26 GB 영상에서 100/500 us가
-    // 39.8 MB/s, 150/500이 36.5, 50/300이 23.3, T3U의 200/2000은 ACK를 기다리는 틈이 늘어 느렸습니다.
-    let ack_quiet_us = env_num::<i64>("USBFWD_ACK_QUIET_US").unwrap_or(if rtw89 { 100 } else { 200 }).max(0);
-    let ack_hold_us = env_num::<u64>("USBFWD_ACK_HOLD_US").unwrap_or(if rtw89 { 500 } else { 2000 }).max(100);
+    // 순수 TCP ACK를 상대가 이만큼 조용할 때까지, 길어야 hold만큼 모읍니다. RTL8912AU는 상대의 PPDU가
+    // 끝날 때 내보내므로(USBFWD_ACK_EOF_US) 이 둘은 그 끝을 놓쳤을 때만 씁니다: 짧으면 USB로 PPDU가
+    // 나뉘어 오는 틈에도 ACK가 나가 PPDU마다 ACK 프레임이 셋쯤 됩니다. 1.26 GB 영상을 받는 데 100/500 us가
+    // 44.0 MB/s, 300/1500이 47.1, 여기에 PPDU 끝을 더하면 51~57. T3U의 200/2000은 그대로.
+    let ack_quiet_us = env_num::<i64>("USBFWD_ACK_QUIET_US").unwrap_or(if rtw89 { 300 } else { 200 }).max(0);
+    let ack_hold_us = env_num::<u64>("USBFWD_ACK_HOLD_US").unwrap_or(if rtw89 { 1500 } else { 2000 }).max(100);
     let tx_ba = env_num::<u32>("USBFWD_TX_BA").unwrap_or(0) != 0;
     let ack_vo = env_num::<u32>("USBFWD_ACK_VO").unwrap_or(0) != 0;
     let bfee = env_num::<u32>("USBFWD_BFEE").unwrap_or(0) != 0;
@@ -1478,6 +1514,7 @@ fn run() -> io::Result<()> {
         peer: Mutex::new(Some(peer_addr)),
         last_rssi: AtomicI64::new(-128),
         last_rx_ns: AtomicI64::new(0),
+        eof_ns: AtomicI64::new(0),
         stats: Stats::default(),
         tx_ba,
         ack_vo,
@@ -1711,6 +1748,33 @@ fn tx_loop(
     // 프레임, 속도, A-MPDU, ACK 없음, 송신 보고 번호
     type Queued = (Vec<u8>, TxRate, bool, bool, Option<u8>, bool);
     let mut pool: Vec<Queued> = Vec::with_capacity(BATCH);
+    // 호스트가 연달아 보낸 같은 상대의 데이터 프레임을 이 크기(MPDU 바이트)까지 A-MSDU 하나로 합칩니다
+    // (0 = 안 합침): 칩이 USB 전송과 A-MPDU에 담는 프레임 수가 한도라, 하나에 MSDU 4~5개를 실으면 PC→iPhone이
+    // 46.8에서 약 73 MB/s가 됩니다.
+    let amsdu_max = env_num::<usize>("USBFWD_TX_AMSDU")
+        .unwrap_or(if radio.rtw89().is_some() { 7935 } else { 0 })
+        .min(7935);
+    // 잡아 둔 TCP ACK가 있으면 recv_from(1 ms 시간 제한이 실제로는 약 1.5 ms)으로 잠들지 않고 들어온 것과
+    // 내보낼 때를 계속 봅니다.
+    let ack_poll = env_num::<u32>("USBFWD_ACK_POLL").unwrap_or(1) != 0;
+    // 합치는 중인 A-MSDU: 프레임, 받는 쪽, MSDU 수, 속도, ACK 없음.
+    type Merging = (Vec<u8>, [u8; 6], usize, u8, bool);
+    let mut merge: Option<Merging> = None;
+    // 합친 것을 보낼 프레임으로: 하나뿐이면 원래 모양으로.
+    let merged = |m: Merging| -> (Vec<u8>, u8, bool) {
+        let (mut f, _, k, rate, noack) = m;
+        if k == 1 {
+            let mut d = Vec::with_capacity(f.len() - 14);
+            d.extend_from_slice(&f[..26]);
+            d[24] &= !0x80;
+            d.extend_from_slice(&f[26 + 14..]);
+            return (d, rate, noack);
+        }
+        relay.stats.tx_amsdu.fetch_add(1, Relaxed);
+        relay.stats.tx_amsdu_msdus.fetch_add(k as u64, Relaxed);
+        f.shrink_to_fit();
+        (f, rate, noack)
+    };
     // 송신 보고는 RTL8822B 펌웨어만 답합니다.
     let report_every = if radio.has_tx_reports() {
         env_num::<u32>("USBFWD_TX_REPORT").unwrap_or(8)
@@ -1725,6 +1789,24 @@ fn tx_loop(
     // 조용한 순간을 기다리는 ACK. 보내기는 이 스레드만 합니다.
     let mut pend: Option<(Vec<u8>, u8, bool, u32)> = None;
     let mut pend_since = Instant::now();
+    // 상대의 PPDU가 끝나고 이만큼 지나면 잡아 둔 ACK를 내보냅니다 (0 = 안 봄): 그 PPDU의 데이터에 대한
+    // 호스트의 ACK(중앙값 약 35 us 뒤)가 다 나왔을 때, PPDU마다 한 번만.
+    let ack_eof = env_num::<i64>("USBFWD_ACK_EOF_US")
+        .unwrap_or(if radio.rtw89().is_some() { 60 } else { 0 })
+        .max(0)
+        * 1000;
+    if ack_eof > 0 {
+        log!("TCP ACKs let go {} us after a PPDU ends", ack_eof / 1000);
+    }
+    // 마지막으로 ACK를 내보낸 시각 (now_ns): 그 뒤에 끝난 PPDU만 셉니다.
+    let mut released_ns = 0i64;
+    let release = |pend_since: Instant, released_ns: i64| -> bool {
+        let now = now_ns();
+        let eof = relay.eof_ns.load(Relaxed);
+        (ack_eof > 0 && eof > released_ns && now - eof >= ack_eof)
+            || now - relay.last_rx_ns.load(Relaxed) >= relay.ack_quiet_us * 1000
+            || pend_since.elapsed() >= Duration::from_micros(ack_hold_us)
+    };
     let flush = |pool: &mut Vec<Queued>| {
         if pool.is_empty() {
             return;
@@ -1800,7 +1882,19 @@ fn tx_loop(
         pool.push((d, r, agg, noack, report, pure && relay.ack_vo));
     };
     while !relay.stop.load(Relaxed) {
-        let got = relay.sock.recv_from(&mut buf);
+        let got = if ack_poll && pend.is_some() {
+            loop {
+                if pending(&relay.sock) {
+                    break relay.sock.recv_from(&mut buf);
+                }
+                if release(pend_since, released_ns) {
+                    break Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
+                std::thread::yield_now();
+            }
+        } else {
+            relay.sock.recv_from(&mut buf)
+        };
         let now = Instant::now();
         let ack_quiet_us = relay.ack_quiet_us;
         if relay.reorder_ms > 0 {
@@ -1813,15 +1907,15 @@ fn tx_loop(
             }
             pool.push((bar_frame(&peer, &relay.ours, ssn), TxRate::legacy(48), false, false, None, false));
         }
-        if let Some((d, rate, noack, _)) = pend.as_ref() {
-            let quiet = now_ns() - relay.last_rx_ns.load(Relaxed);
-            if quiet >= ack_quiet_us * 1000 || now - pend_since >= Duration::from_micros(ack_hold_us) {
-                relay.stats.ack_paced.fetch_add(1, Relaxed);
-                let (d, rate, noack) = (d.clone(), *rate, *noack);
-                pend = None;
-                ack_latency(relay, &relay.ack_air_us);
-                air(&mut pool, &d, rate, noack, ack_vht, true);
-            }
+        if let Some((d, rate, noack, _)) = pend.as_ref()
+            && release(pend_since, released_ns)
+        {
+            relay.stats.ack_paced.fetch_add(1, Relaxed);
+            let (d, rate, noack) = (d.clone(), *rate, *noack);
+            pend = None;
+            released_ns = now_ns();
+            ack_latency(relay, &relay.ack_air_us);
+            air(&mut pool, &d, rate, noack, ack_vht, true);
         }
         if now - last >= Duration::from_secs(10) {
             last = now;
@@ -1872,13 +1966,58 @@ fn tx_loop(
                         None => {
                             if let Some((d, rate, noack, _)) = pend.take() {
                                 relay.stats.ack_paced.fetch_add(1, Relaxed);
+                                released_ns = now_ns();
                                 ack_latency(relay, &relay.ack_air_us);
                                 air(&mut pool, &d, rate, noack, ack_vht, true);
                             }
                             if ack.is_some() {
                                 ack_latency(relay, &relay.ack_air_us);
                             }
-                            air(&mut pool, f, rate, noack, vht, false);
+                            let dst: [u8; 6] = f[4..10].try_into().unwrap();
+                            // 순수 ACK가 아닌 큰 QoS 데이터(TID 0, +HTC 없음, 아직 A-MSDU 아님)를 A-MSDU를
+                            // 받는 Block Ack 합의 안의 유니캐스트 상대에게.
+                            let mergeable = amsdu_max > 0
+                                && relay.tx_ba
+                                && ack.is_none()
+                                && f.len() >= BULK
+                                && f[0] == 0x88
+                                && f[1] & 0x80 == 0
+                                && dst[0] & 1 == 0
+                                && f[24] & 0x8f == 0
+                                && relay.amsdu_ok(&dst);
+                            if mergeable {
+                                // 서브프레임: DA, SA, 길이(빅 엔디언), 페이로드, 다음 것 앞은 4바이트 경계.
+                                let payload = &f[26..];
+                                let fits = merge.as_ref().is_some_and(|(m, d, k, ..)| {
+                                    *d == dst && *k < 8 && 26 + (m.len() - 26).next_multiple_of(4) + 14 + payload.len() <= amsdu_max
+                                });
+                                if fits {
+                                    let m = merge.as_mut().unwrap();
+                                    while !(m.0.len() - 26).is_multiple_of(4) {
+                                        m.0.push(0);
+                                    }
+                                    m.0.extend_from_slice(&f[4..16]);
+                                    m.0.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                                    m.0.extend_from_slice(payload);
+                                    m.2 += 1;
+                                } else {
+                                    if let Some((d, r, na)) = merge.take().map(merged) {
+                                        air(&mut pool, &d, r, na, vht, false);
+                                    }
+                                    let mut m = Vec::with_capacity(amsdu_max);
+                                    m.extend_from_slice(&f[..26]);
+                                    m[24] |= 0x80;
+                                    m.extend_from_slice(&f[4..16]);
+                                    m.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                                    m.extend_from_slice(payload);
+                                    merge = Some((m, dst, 1, rate, noack));
+                                }
+                            } else {
+                                if let Some((d, r, na)) = merge.take().map(merged) {
+                                    air(&mut pool, &d, r, na, vht, false);
+                                }
+                                air(&mut pool, f, rate, noack, vht, false);
+                            }
                         }
                     }
                 }
@@ -1889,6 +2028,9 @@ fn tx_loop(
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
             Err(_) => {}
+        }
+        if let Some((d, r, na)) = merge.take().map(merged) {
+            air(&mut pool, &d, r, na, vht, false);
         }
         flush(&mut pool);
     }

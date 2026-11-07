@@ -69,8 +69,8 @@ PC를 같이 쓰는 사람마다 Apple ID를 하나씩 더할 수 있습니다. 
 
 | 방향 | 걸린 시간 |
 |---|---|
-| iPhone → PC | 31.6초 (39.8 MB/s) |
-| PC → iPhone | iPhone이 수락한 뒤 26.8초 (46.8 MB/s) |
+| iPhone → PC | 22.2~24.5초 (51~57 MB/s) |
+| PC → iPhone | iPhone이 수락한 뒤 16.9~17.3초 (73~74 MB/s) |
 
 T3U Nano로 80 MB(79.75 MB) 영상을 주고받았을 때:
 

@@ -580,3 +580,49 @@ fn block_ack_sessions_are_accepted_only_when_asked_to() {
         assert_eq!(answered, accept);
     }
 }
+
+/// A-MSDUs take a peer's packets only in the order they came: a TCP stream's short tail segment
+/// must not jump ahead of the full ones queued before it.
+#[test]
+fn amsdu_batches_keep_a_peers_packets_in_order() {
+    let radio = RadioConstraints {
+        channel: Channel(6),
+        presence: Presence::Fixed,
+    };
+    let mut cfg = Config::new(US, "owly", radio);
+    cfg.amsdu = true;
+    cfg.max_frame = 3895;
+    let mut n = Node::new(cfg, START);
+    let mut t = meet(&mut n, &seq(PHONE_SEQ));
+    // The phone is on 6 only in slot 8: queue them while it is away.
+    while n.clock().slot(t) != 2 {
+        t = t.plus(1024);
+        tick(&mut n, t);
+    }
+    for i in 0..5u16 {
+        let mut payload = format!("TAG{i}").into_bytes();
+        payload.resize(if i == 4 { 40 } else { 1300 }, b'x');
+        let p = Ipv6Packet::echo_request(US, PHONE, 1, i, &payload);
+        n.handle(Input::Outbound { now: t, packet: p })
+            .for_each(drop);
+    }
+    let mut sent = Vec::new();
+    for _ in 0..(32 * SLOT_US / 256) {
+        t = t.plus(256);
+        for f in transmits(&tick(&mut n, t)) {
+            if f.to == PHONE {
+                sent.extend_from_slice(&f.bytes);
+            }
+        }
+    }
+    let at: Vec<usize> = (0..5)
+        .map(|i| {
+            let tag = format!("TAG{i}");
+            sent.windows(tag.len())
+                .position(|w| w == tag.as_bytes())
+                .unwrap_or_else(|| panic!("{tag} never sent"))
+        })
+        .collect();
+    assert!(n.stats().tx_amsdu > 0, "nothing was batched");
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "out of order: {at:?}");
+}

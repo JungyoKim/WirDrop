@@ -228,6 +228,9 @@ pub struct RxFrame<'a> {
     pub rate: u8,
     /// PPDU 카운터: 한 A-MPDU의 MPDU들은 같은 값입니다.
     pub ppdu_cnt: u8,
+    /// PPDU의 마지막 MPDU: RTL8922A는 PPDU를 다 받은 뒤 그 상태 보고를 보내므로 그때 표시합니다. 그
+    /// PPDU의 MPDU가 앞선 USB 전송에 있었으면 data가 빈 표시만 넘깁니다 (RTL8822B는 늘 false).
+    pub ampdu_end: bool,
     /// PHY 상태 (PPDU의 첫 MPDU): 경로별 출력(dBm), SNR과 EVM (반 dB 단위).
     pub phy: Option<PhyStatus>,
     pub tsf_low: u32,
@@ -789,6 +792,7 @@ fn parse_rtw88<'a>(buf: &'a [u8], mut f: impl FnMut(RxFrame<'a>), mut on_c2h: im
                 icv_err: w0 & (1 << 15) != 0,
                 rate: (w3 & 0x7f) as u8,
                 ppdu_cnt: ((w2 >> 29) & 3) as u8,
+                ampdu_end: false,
                 phy,
                 tsf_low: w5,
             });
@@ -806,6 +810,20 @@ fn parse_rtw89<'a>(buf: &'a [u8], mut f: impl FnMut(RxFrame<'a>)) {
     let mut open = 0;
     rx89::packets(buf, |d, data| {
         if d.kind == rx89::RX_TYPE_PPDU_STAT {
+            if let Some(r) = held[open..].iter_mut().rev().find(|r| r.ppdu_cnt == d.ppdu_cnt) {
+                r.ampdu_end = true;
+            } else {
+                held.push(RxFrame {
+                    data: &[],
+                    crc_err: false,
+                    icv_err: false,
+                    rate: 0,
+                    ppdu_cnt: d.ppdu_cnt,
+                    ampdu_end: true,
+                    phy: None,
+                    tsf_low: d.free_run,
+                });
+            }
             let Some(phy) = rx89::ppdu_power(data) else { return };
             let phy = PhyStatus {
                 power: phy,
@@ -832,6 +850,7 @@ fn parse_rtw89<'a>(buf: &'a [u8], mut f: impl FnMut(RxFrame<'a>)) {
             icv_err: d.icv_err,
             rate: rate_from_v1(d.rate),
             ppdu_cnt: d.ppdu_cnt,
+            ampdu_end: false,
             phy: None,
             tsf_low: d.free_run,
         });

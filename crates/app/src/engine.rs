@@ -215,8 +215,11 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
         link_cfg.usbfwd.env.push(("USBFWD_COUNTRY".into(), country.clone()));
     }
     // BE6500UA(RTL8912AU)는 Wi-Fi 6(HE)을 받으므로 iPhone에 알립니다 (usbfwd도 이것을 먼저 고릅니다).
+    // 보내는 패킷은 usbfwd가 순서대로 7935바이트까지 A-MSDU로 묶으므로 owly는 묶지 않습니다: owly가 둘씩
+    // 묶은 프레임은 usbfwd가 더 합치지 못합니다.
     if crate::win::find_adapter().is_some_and(|a| a.contains("RTL8912AU")) {
         link_cfg.tuning.awdl_ext_flags |= wirdrop::owly_awdl::tlv::ext_flag::HE;
+        link_cfg.tuning.amsdu_max_frame = None;
     }
     tracing::info!("AWDL extension flags 0x{:04x}", link_cfg.tuning.awdl_ext_flags);
     let ports: Vec<u16> = (0..members.len() as u16).map(|i| airdrop::PORT + i).collect();
