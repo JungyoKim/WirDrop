@@ -1377,6 +1377,28 @@ fn pending(sock: &UdpSocket) -> bool {
     unsafe { ioctlsocket(SOCKET(sock.as_raw_socket() as usize), FIONREAD, &mut n) == 0 && n > 0 }
 }
 
+/// 받을 데이터그램이 생길 때까지 최대 `ms` 밀리초 기다립니다. 소켓에 받기 시간 제한(SO_RCVTIMEO)을 걸고
+/// 기다리면 Windows는 시간이 다 되는 바로 그때 도착한 데이터그램을 가끔 삼킵니다: 1 ms 제한으로 20만 개 중
+/// 7~159개. 엔진이 보낸 TCP 세그먼트가 그렇게 사라지면 Windows TCP가 재전송하며 혼잡 창을 줄여, PC→iPhone이
+/// 75 MB/s에서 20 MB/s대로 떨어진 채 회복하지 못했습니다 (실험 23).
+fn readable(sock: &UdpSocket, ms: i32) -> bool {
+    use windows::Win32::Networking::WinSock::{POLLRDNORM, SOCKET, WSAPOLLFD, WSAPoll};
+    let mut fd = WSAPOLLFD {
+        fd: SOCKET(sock.as_raw_socket() as usize),
+        events: POLLRDNORM,
+        revents: Default::default(),
+    };
+    // SAFETY: 우리 소켓 하나를 기다립니다.
+    match unsafe { WSAPoll(&mut fd, 1, ms) } {
+        0 => false,
+        n if n > 0 => true,
+        _ => {
+            std::thread::sleep(Duration::from_millis(ms.max(1) as u64));
+            false
+        }
+    }
+}
+
 /// 부르는 스레드를 평범한 일보다 앞에: 무선의 프레임과 거기 실리는 TCP ACK가 1 ms씩 이것을
 /// 기다립니다.
 fn raise_thread() {
@@ -1471,7 +1493,6 @@ fn run() -> io::Result<()> {
     let sock = UdpSocket::bind(SocketAddrV4::new([127, 0, 0, 1].into(), port))
         .map_err(|e| io::Error::other(format!("cannot bind UDP 127.0.0.1:{port} ({e})")))?;
     sock_tune(&sock);
-    sock.set_read_timeout(Some(Duration::from_millis(1)))?;
     let peer_addr: SocketAddr = peer.parse().map_err(|_| usage())?;
 
     let ampdu_spec = std::env::var("USBFWD_AMPDU").unwrap_or_default();
@@ -1892,8 +1913,10 @@ fn tx_loop(
                 }
                 std::thread::yield_now();
             }
-        } else {
+        } else if readable(&relay.sock, 1) {
             relay.sock.recv_from(&mut buf)
+        } else {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
         };
         let now = Instant::now();
         let ack_quiet_us = relay.ack_quiet_us;

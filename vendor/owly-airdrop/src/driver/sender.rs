@@ -2,8 +2,11 @@
 //! one fresh TLS connection (HTTP-1), running a
 //! [`proto::sender::Transfer`](crate::proto::sender::Transfer).
 //!
-//! The archive is compressed into a temporary file before the `/Ask`, so the
-//! upload can carry a `Content-Length` like Finder's (UP-1a).
+//! The `/Ask` goes out at once with the files' names and sizes. Their archive
+//! is packed alongside, on a thread of its own, and uploaded chunked as it comes
+//! (UP-1a), as an iPhone sends: packing it into a file first, for a
+//! `Content-Length` like Finder's, held a 1.26 GB video's `/Ask` back five
+//! seconds.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -34,6 +37,10 @@ const DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
 /// A write the receiver doesn't take in this long fails the transfer, so a
 /// receiver that stops reading can't hold the sender forever (SEC-10).
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The packed archive reaches the upload in blocks of this size, at most
+/// BODY_BLOCKS of them ahead of it (16 MB).
+const BODY_BLOCK: usize = 256 << 10;
+const BODY_BLOCKS: usize = 64;
 
 /// What to send.
 #[derive(Debug, Clone)]
@@ -42,7 +49,9 @@ pub enum Payload {
     Urls(Vec<String>),
 }
 
-/// Upload progress, in bytes of the compressed body.
+/// Upload progress, in bytes of the compressed body. `total` is the files'
+/// size, which a DVZip archive of photos and videos matches within its
+/// headers; `sent` stops there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
     pub sent: u64,
@@ -52,7 +61,7 @@ pub struct Progress {
 /// What a transfer reports while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// The files are packed (the archive is ready) and the `/Ask` is going out.
+    /// The `/Ask` is going out; for files, packing has started alongside.
     Asking,
     /// The receiver accepted the `/Ask`. A failure after this one is the
     /// upload's.
@@ -67,6 +76,54 @@ impl Drop for Alive {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Relaxed);
     }
+}
+
+/// An archive being packed for the upload.
+struct Body {
+    blocks: mpsc::Receiver<io::Result<Vec<u8>>>,
+    total: u64,
+    _alive: Alive,
+}
+
+/// Hands what it is given to the upload in blocks of BODY_BLOCK, waiting while
+/// BODY_BLOCKS of them are unsent. Fails once the upload is gone.
+struct BlockWriter {
+    tx: mpsc::Sender<io::Result<Vec<u8>>>,
+    buf: Vec<u8>,
+}
+
+impl BlockWriter {
+    fn send_block(&mut self) -> io::Result<()> {
+        let block = std::mem::replace(&mut self.buf, Vec::with_capacity(BODY_BLOCK + (64 << 10)));
+        self.tx
+            .blocking_send(Ok(block))
+            .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "the send was cancelled"))
+    }
+}
+
+impl Write for BlockWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= BODY_BLOCK {
+            self.send_block()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        self.send_block()
+    }
+}
+
+/// Why an upload stopped short.
+enum UploadError {
+    /// Packing the archive failed: a file went away or shrank.
+    Pack(io::Error),
+    /// Writing to the receiver failed, which may have refused and closed.
+    Write(io::Error),
 }
 
 pub struct Sender {
@@ -133,36 +190,56 @@ impl Sender {
         } else {
             Compressor::Gzip
         };
-        let (offer, archive) = match payload {
+        let (offer, mut body) = match payload {
             Payload::Urls(urls) => (Offer::Urls(urls.clone()), None),
             Payload::Files(paths) => {
                 let paths = paths.clone();
+                let (offer, items) = tokio::task::spawn_blocking(move || offer_for(&paths))
+                    .await
+                    .map_err(io::Error::other)??;
+                let total = match &offer {
+                    Offer::Files(files) => files.iter().filter_map(|f| f.size).sum(),
+                    Offer::Urls(_) => 0,
+                };
                 // Packing runs on a thread of its own, which a dropped future can't stop: it
                 // looks at the flag before each file and block, and gives up once the send is
-                // gone (a big folder would otherwise go on being packed into the spool).
+                // gone or the receiver declined (its blocks have nowhere to go).
                 let alive = Arc::new(AtomicBool::new(true));
-                let _alive = Alive(alive.clone());
-                let (offer, file, len) = tokio::task::spawn_blocking(move || {
-                    prepare_cancellable(&paths, compressor, &|| {
-                        if alive.load(Ordering::Relaxed) {
+                let (tx, blocks) = mpsc::channel(BODY_BLOCKS);
+                let flag = alive.clone();
+                tokio::task::spawn_blocking(move || {
+                    let check = || {
+                        if flag.load(Ordering::Relaxed) {
                             Ok(())
                         } else {
-                            Err(io::Error::new(io::ErrorKind::Interrupted, "the send was cancelled"))
+                            Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "the send was cancelled",
+                            ))
                         }
-                    })
-                })
-                .await
-                .map_err(io::Error::other)??;
-                (offer, Some((file, len)))
+                    };
+                    let out = BlockWriter {
+                        tx: tx.clone(),
+                        buf: Vec::with_capacity(BODY_BLOCK + (64 << 10)),
+                    };
+                    if let Err(e) = pack(&items, compressor, &check, out) {
+                        let _ = tx.blocking_send(Err(e));
+                    }
+                });
+                let body = Body {
+                    blocks,
+                    total,
+                    _alive: Alive(alive),
+                };
+                (offer, Some(body))
             }
         };
         if let Some(events) = &events {
             let _ = events.send(Event::Asking);
         }
         let transfer_id = uuid_v4()?;
-        let body = archive.as_ref().map(|(_, len)| (compressor, *len));
-        let mut transfer = Transfer::new(&self.config, &transfer_id, &offer, body);
-        let mut archive = archive.map(|(file, _)| tokio::fs::File::from_std(file));
+        let framing = body.as_ref().map(|_| (compressor, None));
+        let mut transfer = Transfer::new(&self.config, &transfer_id, &offer, framing);
 
         let mut tls = self.connect(addr).await?;
         let mut buf = vec![0; 16 << 10];
@@ -186,10 +263,14 @@ impl Sender {
                     }
                     Action::Reconnect => tls = self.connect(addr).await?,
                     Action::SendUpload(head) => {
-                        let file = archive.as_mut().expect("a file share has an archive");
-                        match upload(&mut tls, &head, file, events.as_ref()).await {
+                        let body = body.as_mut().expect("a file share has a body");
+                        match upload(&mut tls, &head, body, events.as_ref()).await {
                             Ok(()) => transfer.upload_sent(),
-                            Err(e) => {
+                            Err(UploadError::Pack(e)) => {
+                                let _ = tls.shutdown().await;
+                                return Err(e);
+                            }
+                            Err(UploadError::Write(e)) => {
                                 // The receiver may have refused and closed;
                                 // its response, if any, says why.
                                 tracing::debug!("upload write failed: {e}");
@@ -238,28 +319,37 @@ async fn read_response<S: AsyncReadExt + Unpin>(stream: &mut S) -> io::Result<se
     }
 }
 
+/// The chunked upload (UP-1a): each packed block as a chunk, then the last,
+/// empty one.
 async fn upload<S: AsyncWriteExt + Unpin>(
     stream: &mut S,
     head: &[u8],
-    file: &mut tokio::fs::File,
+    body: &mut Body,
     events: Option<&mpsc::UnboundedSender<Event>>,
-) -> io::Result<()> {
-    let total = file.metadata().await?.len();
-    write(stream, head).await?;
-    let mut buf = vec![0; 64 << 10];
+) -> Result<(), UploadError> {
+    write(stream, head).await.map_err(UploadError::Write)?;
     let mut sent = 0;
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
+    let mut chunk = Vec::with_capacity(BODY_BLOCK + (64 << 10) + 16);
+    while let Some(block) = body.blocks.recv().await {
+        let block = block.map_err(UploadError::Pack)?;
+        if block.is_empty() {
+            continue;
         }
-        write(stream, &buf[..n]).await?;
-        sent += n as u64;
+        chunk.clear();
+        chunk.extend_from_slice(format!("{:x}\r\n", block.len()).as_bytes());
+        chunk.extend_from_slice(&block);
+        chunk.extend_from_slice(b"\r\n");
+        write(stream, &chunk).await.map_err(UploadError::Write)?;
+        sent += block.len() as u64;
         if let Some(events) = events {
-            let _ = events.send(Event::Progress(Progress { sent, total }));
+            let progress = Progress {
+                sent: sent.min(body.total),
+                total: body.total,
+            };
+            let _ = events.send(Event::Progress(progress));
         }
     }
-    Ok(())
+    write(stream, b"0\r\n\r\n").await.map_err(UploadError::Write)
 }
 
 /// Writes and flushes `bytes`, failing if the receiver stalls.
@@ -302,6 +392,44 @@ pub fn prepare_cancellable(
     compressor: Compressor,
     check: &dyn Fn() -> io::Result<()>,
 ) -> io::Result<(Offer, File, u64)> {
+    let items = items(paths, check)?;
+    let mut spool = tempfile::tempfile()?;
+    let files = pack(&items, compressor, check, io::BufWriter::new(&mut spool))?;
+    let len = spool.stream_position()?;
+    spool.rewind()?;
+    Ok((Offer::Files(files), spool, len))
+}
+
+/// The `/Ask` offer for `paths`, from their names and sizes without reading
+/// them, and the items to [pack].
+pub fn offer_for(paths: &[PathBuf]) -> io::Result<(Offer, Vec<(String, PathBuf)>)> {
+    let items = items(paths, &|| Ok(()))?;
+    let mut files = Vec::new();
+    for (name, path) in &items {
+        let meta = std::fs::symlink_metadata(path)?;
+        let size = if meta.file_type().is_symlink() {
+            return Err(invalid("symbolic links are not transferred".into()));
+        } else if meta.is_dir() {
+            tree_size(path, &format!("./{name}"))?
+        } else if meta.is_file() {
+            fits(path, &meta)?;
+            meta.len()
+        } else {
+            return Err(invalid(format!(
+                "{} isn't a file or directory",
+                path.display()
+            )));
+        };
+        files.push(ask_file(name, &meta, size));
+    }
+    Ok((Offer::Files(files), items))
+}
+
+/// The items to send, named as they will arrive.
+fn items(
+    paths: &[PathBuf],
+    check: &dyn Fn() -> io::Result<()>,
+) -> io::Result<Vec<(String, PathBuf)>> {
     check()?;
     let mut items = Vec::new();
     for path in paths {
@@ -319,11 +447,19 @@ pub fn prepare_cancellable(
     if items.is_empty() {
         return Err(invalid("nothing to send".into()));
     }
+    Ok(items)
+}
 
-    let mut spool = tempfile::tempfile()?;
+/// Writes the archive of `items` to `out`, returning their `/Ask` entries.
+fn pack(
+    items: &[(String, PathBuf)],
+    compressor: Compressor,
+    check: &dyn Fn() -> io::Result<()>,
+    out: impl Write,
+) -> io::Result<Vec<AskFile>> {
     let mut writer = ArchiveWriter {
         encoder: Encoder::new(compressor, Compression::fast()),
-        out: io::BufWriter::new(&mut spool),
+        out,
         ino: 1,
         check,
     };
@@ -333,7 +469,7 @@ pub fn prepare_cancellable(
         None,
     )?;
     let mut files = Vec::new();
-    for (name, path) in &items {
+    for (name, path) in items {
         check()?;
         let meta = std::fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
@@ -350,18 +486,99 @@ pub fn prepare_cancellable(
                 path.display()
             )));
         };
-        files.push(AskFile {
-            name: name.clone(),
-            file_type: sender::uti(name, meta.is_dir()).into(),
-            size: Some(size),
-            bom_path: format!("./{name}"),
-            is_directory: meta.is_dir(),
-        });
+        files.push(ask_file(name, &meta, size));
     }
     writer.finish()?;
-    let len = spool.stream_position()?;
-    spool.rewind()?;
-    Ok((Offer::Files(files), spool, len))
+    Ok(files)
+}
+
+fn ask_file(name: &str, meta: &std::fs::Metadata, size: u64) -> AskFile {
+    AskFile {
+        name: name.into(),
+        file_type: sender::uti(name, meta.is_dir()).into(),
+        size: Some(size),
+        bom_path: format!("./{name}"),
+        is_directory: meta.is_dir(),
+    }
+}
+
+/// A file the odc archive can hold.
+fn fits(path: &Path, meta: &std::fs::Metadata) -> io::Result<()> {
+    if meta.len() > cpio::ODC_MAX_SIZE {
+        return Err(invalid(format!(
+            "{} is too large for an archive",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// A directory's entries to send, in name order. Links (symlinks and
+/// junctions, which could lead outside it or round in a loop), special files
+/// and, on Windows, files that are both hidden and system (desktop.ini,
+/// Thumbs.db) are left out. Other reparse points, such as OneDrive's files
+/// kept online, are read like any file.
+fn children(
+    path: &Path,
+    check: &dyn Fn() -> io::Result<()>,
+) -> io::Result<Vec<(String, PathBuf, std::fs::Metadata)>> {
+    let mut listed = Vec::new();
+    for child in std::fs::read_dir(path)? {
+        check()?;
+        if listed.len() >= 100_000 {
+            return Err(invalid("directory has too many entries".into()));
+        }
+        listed.push(child?);
+    }
+    listed.sort_by_key(|c| c.file_name());
+    let mut out = Vec::new();
+    for child in listed {
+        check()?;
+        let Some(child_name) = child.file_name().to_str().map(String::from) else {
+            return Err(invalid("file name is not UTF-8".into()));
+        };
+        if RelPath::file_name(&child_name).is_err() {
+            return Err(invalid("unsafe file name".into()));
+        }
+        let meta = std::fs::symlink_metadata(child.path())?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const HIDDEN_SYSTEM: u32 = 0x2 | 0x4;
+            if meta.file_attributes() & HIDDEN_SYSTEM == HIDDEN_SYSTEM {
+                continue;
+            }
+        }
+        if meta.is_dir() || meta.is_file() {
+            out.push((child_name, child.path(), meta));
+        }
+    }
+    Ok(out)
+}
+
+fn deep(name: &str) -> io::Result<()> {
+    if name.split('/').count() > 65 {
+        return Err(invalid("directory nesting exceeds limit".into()));
+    }
+    Ok(())
+}
+
+/// The total file size [ArchiveWriter::tree] will pack under `path`.
+fn tree_size(path: &Path, name: &str) -> io::Result<u64> {
+    deep(name)?;
+    let mut total = 0;
+    for (child_name, child_path, meta) in children(path, &|| Ok(()))? {
+        if meta.is_dir() {
+            total += tree_size(&child_path, &format!("{name}/{child_name}"))?;
+        } else {
+            fits(&child_path, &meta)?;
+            total += meta.len();
+        }
+    }
+    Ok(total)
 }
 
 fn invalid(message: String) -> io::Error {
@@ -446,12 +663,7 @@ impl<W: Write> ArchiveWriter<'_, W> {
 
     fn file(&mut self, path: &Path, name: &str, meta: &std::fs::Metadata) -> io::Result<()> {
         (self.check)()?;
-        if meta.len() > cpio::ODC_MAX_SIZE {
-            return Err(invalid(format!(
-                "{} is too large for an archive",
-                path.display()
-            )));
-        }
+        fits(path, meta)?;
         let mut file = File::open(path)?;
         self.entry(
             &file_entry(name, meta.len(), 0, mtime(meta)),
@@ -459,52 +671,18 @@ impl<W: Write> ArchiveWriter<'_, W> {
         )
     }
 
-    /// A directory and everything under it, in name order. Links (symlinks
-    /// and junctions, which could lead outside it or round in a loop),
-    /// special files and, on Windows, files that are both hidden and system
-    /// (desktop.ini, Thumbs.db) are left out. Other reparse points, such as
-    /// OneDrive's files kept online, are read like any file. Returns the
-    /// total file size.
+    /// A directory and everything under it, as [children] lists them.
+    /// Returns the total file size.
     fn tree(&mut self, path: &Path, name: &str) -> io::Result<u64> {
-        if name.split('/').count() > 65 {
-            return Err(invalid("directory nesting exceeds limit".into()));
-        }
+        deep(name)?;
         self.entry(&dir_entry(name, mtime(&std::fs::metadata(path)?)), None)?;
-        let mut children = Vec::new();
-        for child in std::fs::read_dir(path)? {
-            (self.check)()?;
-            if children.len() >= 100_000 {
-                return Err(invalid("directory has too many entries".into()));
-            }
-            children.push(child?);
-        }
-        children.sort_by_key(|c| c.file_name());
         let mut total = 0;
-        for child in children {
-            (self.check)()?;
-            let Some(child_name) = child.file_name().to_str().map(String::from) else {
-                return Err(invalid("file name is not UTF-8".into()));
-            };
-            if RelPath::file_name(&child_name).is_err() {
-                return Err(invalid("unsafe file name".into()));
-            }
-            let meta = std::fs::symlink_metadata(child.path())?;
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                const HIDDEN_SYSTEM: u32 = 0x2 | 0x4;
-                if meta.file_attributes() & HIDDEN_SYSTEM == HIDDEN_SYSTEM {
-                    continue;
-                }
-            }
-            let child_path = format!("{name}/{child_name}");
+        for (child_name, child_path, meta) in children(path, self.check)? {
+            let child_name = format!("{name}/{child_name}");
             if meta.is_dir() {
-                total += self.tree(&child.path(), &child_path)?;
-            } else if meta.is_file() {
-                self.file(&child.path(), &child_path, &meta)?;
+                total += self.tree(&child_path, &child_name)?;
+            } else {
+                self.file(&child_path, &child_name, &meta)?;
                 total += meta.len();
             }
         }

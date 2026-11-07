@@ -38,7 +38,6 @@ impl UdpAir {
         let sock = UdpSocket::bind(local)?;
         let (before, after) = tune(&sock);
         tracing::info!("UDP radio: socket buffer {} KB -> {} KB", before / 1024, after / 1024);
-        sock.set_read_timeout(Some(Duration::from_millis(200)))?;
         sock.send_to(&[0, 0, 0, 0], peer)?;
         let (rx_in, rx) = mpsc::channel(8192);
         let stop = Arc::new(AtomicBool::new(false));
@@ -48,6 +47,10 @@ impl UdpAir {
         std::thread::Builder::new().name("udp-air-rx".into()).spawn(move || {
             let mut buf = vec![0u8; 9000];
             while !stopped.load(Relaxed) {
+                // 멈추라는 표시를 보려고 200 ms마다 깨어납니다 (받기 시간 제한은 데이터그램을 삼킵니다: [readable]).
+                if !readable(&reader, 200) {
+                    continue;
+                }
                 let Ok((n, _)) = reader.recv_from(&mut buf) else { continue };
                 if n < 4 || buf[0] != 1 {
                     continue;
@@ -103,6 +106,27 @@ fn tune(sock: &UdpSocket) -> (i32, i32) {
         setsockopt(s, SOL_SOCKET, SO_SNDBUF, size.as_ptr(), 4);
     }
     (before, rcvbuf())
+}
+
+/// 받을 데이터그램이 생길 때까지 최대 `ms` 밀리초 기다립니다. 소켓에 받기 시간 제한(SO_RCVTIMEO)을 걸고
+/// 기다리면 Windows는 시간이 다 되는 바로 그때 도착한 데이터그램을 가끔 삼킵니다 (1 ms 제한으로 20만 개 중
+/// 7~159개, usbfwd의 readable과 같은 까닭).
+fn readable(sock: &UdpSocket, ms: i32) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{POLLRDNORM, WSAPOLLFD, WSAPoll};
+    let mut fd = WSAPOLLFD {
+        fd: sock.as_raw_socket() as usize,
+        events: POLLRDNORM,
+        revents: 0,
+    };
+    // SAFETY: 우리 소켓 하나를 기다립니다.
+    match unsafe { WSAPoll(&mut fd, 1, ms) } {
+        0 => false,
+        n if n > 0 => true,
+        _ => {
+            std::thread::sleep(Duration::from_millis(ms.max(1) as u64));
+            false
+        }
+    }
 }
 
 impl Air for UdpAir {

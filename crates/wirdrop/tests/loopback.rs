@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use wirdrop::airdrop::{self, Outcome, Payload, ReceiverEvent, SendEvent};
+use wirdrop::airdrop::{self, Outcome, Payload, ReceiverEvent};
 use wirdrop::owly_airdrop::driver::receiver::{Options, Receiver};
 use wirdrop::owly_airdrop::driver::sender::Sender;
 use wirdrop::owly_airdrop::proto::mdns::RECEIVER_FLAGS;
@@ -64,7 +64,8 @@ struct Run {
     outcome: Outcome,
     /// 받은 것들 (수락했을 때).
     received: Option<Vec<PathBuf>>,
-    /// 수락부터 끝까지 걸린 시간.
+    /// 보내기를 시작한 때부터 끝까지 걸린 시간: 수락을 기다리는 동안 압축이 함께 돌므로 수락부터가
+    /// 아니라 처음부터 잽니다.
     secs: f64,
 }
 
@@ -84,10 +85,11 @@ async fn transfer(scratch: &Scratch, payload: Payload, accept: bool) -> Run {
 
     let sender = Sender::new(airdrop::sender_config(&Profile::new("Phone", "bbbbbbbbbbbb"), Default::default())).unwrap();
     let (tx, mut progress) = mpsc::unbounded_channel();
+    let started = Instant::now();
     let mut send = tokio::spawn(async move { sender.send(addr, &payload, RECEIVER_FLAGS, Some(tx)).await });
 
     let run = async {
-        let (mut outcome, mut received, mut accepted_at, mut progress_open) = (None, None, None, true);
+        let (mut outcome, mut received, mut progress_open) = (None, None, true);
         loop {
             tokio::select! {
                 event = events.recv() => match event.expect("the receiver stopped") {
@@ -98,7 +100,6 @@ async fn transfer(scratch: &Scratch, payload: Payload, accept: bool) -> Run {
                     _ => {}
                 },
                 event = progress.recv(), if progress_open => match event {
-                    Some(SendEvent::Accepted) => accepted_at = Some(Instant::now()),
                     Some(_) => {}
                     None => progress_open = false,
                 },
@@ -107,11 +108,10 @@ async fn transfer(scratch: &Scratch, payload: Payload, accept: bool) -> Run {
             if let Some(outcome) = &outcome
                 && (received.is_some() || !accept)
             {
-                let secs = accepted_at.map_or(0.0, |t: Instant| t.elapsed().as_secs_f64());
                 return Run {
                     outcome: outcome.clone(),
                     received,
-                    secs,
+                    secs: started.elapsed().as_secs_f64(),
                 };
             }
         }
@@ -167,7 +167,11 @@ async fn loopback_throughput() {
     let run = transfer(&s, Payload::Files(vec![file]), true).await;
     assert_eq!(run.outcome, Outcome::Delivered);
     let mbps = size as f64 / 1e6 / run.secs.max(0.001);
-    println!("LOOPBACK {:.1} MB in {:.2} s ({mbps:.1} MB/s)", size as f64 / 1e6, run.secs);
+    println!(
+        "LOOPBACK {:.1} MB in {:.2} s from the start ({mbps:.1} MB/s)",
+        size as f64 / 1e6,
+        run.secs
+    );
     if let Some(min) = std::env::var("WIRDROP_MIN_MBPS").ok().and_then(|v| v.parse::<f64>().ok()) {
         assert!(mbps >= min, "loopback {mbps:.1} MB/s is under the floor of {min} MB/s");
     }

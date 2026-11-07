@@ -72,7 +72,7 @@ use Wi-Fi 6 (HE, two streams, 80 MHz):
 | Direction | Time |
 |---|---|
 | iPhone → PC | 22.2 to 24.5 s (51 to 57 MB/s) |
-| PC → iPhone | 16.9 to 17.3 s after the iPhone accepts (73 to 74 MB/s) |
+| PC → iPhone | 15.7 to 20.5 s (61 to 80 MB/s, usually 76 to 80); the iPhone accepts within a second |
 
 An 80 MB (79.75 MB) video with the T3U Nano:
 

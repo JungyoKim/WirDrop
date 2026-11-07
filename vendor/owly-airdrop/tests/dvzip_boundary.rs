@@ -51,7 +51,7 @@ async fn open_ended_upload(allow: bool, wait: Duration) -> (Option<Vec<PathBuf>>
     let mut stream = connector.connect(tls::server_name(), tcp).await.unwrap();
     let cfg = sender::Config::new("Phone", "0123456789ab");
     let id = "6B1C4F0E-8E1A-4C3B-9D2A-1F2E3D4C5B6A";
-    let mut transfer = Transfer::new(&cfg, id, &offer, Some((Compressor::DvZip, len)));
+    let mut transfer = Transfer::new(&cfg, id, &offer, Some((Compressor::DvZip, Some(len))));
 
     let (mut saved, mut outcome) = (None, None);
     let mut deadline = Instant::now() + Duration::from_secs(10);

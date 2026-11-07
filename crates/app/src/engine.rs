@@ -655,7 +655,11 @@ fn start_send(
                     let mut total = 0;
                     while let Some(event) = progress.recv().await {
                         let state = match event {
-                            SendEvent::Asking => SendState::Asking,
+                            SendEvent::Asking => {
+                                // 여기까지가 우리 쪽 준비: 나머지는 연결과 받는 기기의 판단.
+                                tracing::info!("send {job}: asking after {:.2} s", asked.elapsed().as_secs_f64());
+                                SendState::Asking
+                            }
                             SendEvent::Accepted => {
                                 accepted = Some(Instant::now());
                                 SendState::Accepted

@@ -141,9 +141,14 @@ pub fn ask_request(config: &Config, transfer_id: &str, offer: &Offer) -> Vec<u8>
     plist_request(Path::Ask, &request.to_plist())
 }
 
-/// The `/Upload` head for a body of `len` bytes (UP-1a, UP-9, UP-10).
-pub fn upload_head(transfer_id: &str, compressor: Compressor, len: u64) -> Vec<u8> {
-    let len = len.to_string();
+/// The `/Upload` head for a body of `len` bytes, or a chunked one when it is
+/// still being packed (UP-1a, UP-9, UP-10).
+pub fn upload_head(transfer_id: &str, compressor: Compressor, len: Option<u64>) -> Vec<u8> {
+    let len = len.map(|n| n.to_string());
+    let framing = match &len {
+        Some(n) => ("Content-Length", n.as_str()),
+        None => ("Transfer-Encoding", "chunked"),
+    };
     head(
         Path::Upload,
         &[
@@ -151,7 +156,7 @@ pub fn upload_head(transfer_id: &str, compressor: Compressor, len: u64) -> Vec<u
             ("TotalBytes", "0"),
             ("Content-Type", compressor.content_type()),
             ("Connection", "keep-alive"),
-            ("Content-Length", &len),
+            framing,
         ],
     )
 }
@@ -332,19 +337,20 @@ pub struct Transfer {
     state: State,
     transfer_id: String,
     is_url: bool,
-    upload: Option<(Compressor, u64)>,
+    upload: Option<(Compressor, Option<u64>)>,
     reader: ResponseReader,
     actions: VecDeque<Action>,
 }
 
 impl Transfer {
     /// Starts by sending the `/Ask`. `upload` is the compression and length
-    /// of the body to upload once accepted, for a file share.
+    /// of the body to upload once accepted, for a file share: no length for a
+    /// chunked body.
     pub fn new(
         config: &Config,
         transfer_id: &str,
         offer: &Offer,
-        upload: Option<(Compressor, u64)>,
+        upload: Option<(Compressor, Option<u64>)>,
     ) -> Self {
         let is_url = matches!(offer, Offer::Urls(_));
         let actions = VecDeque::from([
@@ -514,7 +520,8 @@ mod tests {
         for request in [
             discover_request(&config),
             ask_request(&config, "ID", &file_offer()),
-            upload_head("ID", Compressor::Gzip, 0),
+            upload_head("ID", Compressor::Gzip, Some(0)),
+            upload_head("ID", Compressor::DvZip, None),
         ] {
             let (head, _) = http::parse_request(&request, &http::Limits::default())
                 .unwrap()
@@ -526,7 +533,7 @@ mod tests {
     #[test]
     fn uploads_once_accepted() {
         let config = Config::new("Test", "0123456789ab");
-        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, 10)));
+        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, Some(10))));
         let actions = drain(&mut t);
         assert!(matches!(actions[0], Action::Transmit(_)));
         assert_eq!(actions[1], Action::SetTimer(Some(ASK_TIMEOUT)));
@@ -551,17 +558,36 @@ mod tests {
         );
     }
 
+    // spec: UP-1a
+    #[test]
+    fn a_body_still_being_packed_goes_chunked() {
+        let config = Config::new("Test", "0123456789ab");
+        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::DvZip, None)));
+        drain(&mut t);
+        t.receive(&response(
+            200,
+            &plist::to_bytes(&AskResponse::default().to_plist()),
+        ));
+        let Some(Action::SendUpload(head)) = drain(&mut t).pop() else {
+            panic!("no upload")
+        };
+        let (head, _) = http::parse_request(&head, &http::Limits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.body, BodyKind::Chunked);
+    }
+
     // spec: ASK-1
     #[test]
     fn refusals_are_distinct_from_transport_failures() {
         let config = Config::new("Test", "0123456789ab");
         for reply in [response(403, b""), response(500, b"")] {
-            let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, 10)));
+            let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, Some(10))));
             drain(&mut t);
             t.receive(&reply);
             assert_eq!(drain(&mut t).last(), Some(&Action::Done(Outcome::Declined)));
         }
-        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, 10)));
+        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, Some(10))));
         t.receive_eof();
         assert_eq!(
             drain(&mut t).last(),
@@ -569,7 +595,7 @@ mod tests {
                 "connection closed before a response".into()
             )))
         );
-        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, 10)));
+        let mut t = Transfer::new(&config, "ID", &file_offer(), Some((Compressor::Gzip, Some(10))));
         t.timeout();
         assert_eq!(
             drain(&mut t).last(),
