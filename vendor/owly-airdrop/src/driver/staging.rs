@@ -10,14 +10,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::proto::archive::extract::{RelPath, collision_name};
+
+/// Received bytes reach the file in writes of this size: each write is a
+/// trip to a blocking thread, and the archive comes in 64 KB pieces.
+const WRITE_BUF: usize = 1 << 20;
 
 pub struct Staging {
     dir: tempfile::TempDir,
     dest: PathBuf,
-    file: Option<fs::File>,
+    file: Option<BufWriter<fs::File>>,
     /// Top-level names, in the order they arrived.
     top: Vec<String>,
 }
@@ -65,6 +69,8 @@ impl Staging {
     }
 
     pub async fn create_file(&mut self, path: &RelPath) -> io::Result<()> {
+        // The last file's buffered bytes first.
+        self.end_file().await?;
         let path = self.join(path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
@@ -73,7 +79,7 @@ impl Staging {
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o644);
-        self.file = Some(options.open(path).await?);
+        self.file = Some(BufWriter::with_capacity(WRITE_BUF, options.open(path).await?));
         Ok(())
     }
 

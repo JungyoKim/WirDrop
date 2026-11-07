@@ -4,6 +4,10 @@
 //!     무선 -> 호스트: [u8 1][i8 rssi, 모르면 -128][u16 le 길이] + 802.11 프레임 (FCS 없음)
 //!     호스트 -> 무선: [u8 1][u8 속도: 500 kb/s 단위, 또는 0x80|MCS][u8 플래그: bit0 ACK 없음][u8 0] + 프레임
 //!
+//! 무선 -> 호스트 데이터그램 하나에는 USB 전송 하나에서 나온 프레임들이 위 모양으로 잇달아 듭니다.
+//! 호스트 -> 무선도 [u8 2][속도][플래그][u8 0][u16 le 길이] + 프레임을 잇달아 담을 수 있습니다. 프레임마다
+//! 데이터그램 하나면 받기 1.26 GB에 시스템 호출만 양쪽 합쳐 수십만 번입니다.
+//!
 //! --mac으로 오는 프레임에는 어댑터의 하드웨어 ACK/Block Ack 응답기가 답하므로 iPhone은 확인받는
 //! A-MPDU를 연달아 보낼 수 있습니다.
 //!
@@ -48,12 +52,17 @@
 //!     USBFWD_ACK_VO=1               순수 TCP ACK를 음성 큐로: 채널을 고정 34 us만 기다리므로 최선
 //!                                   노력 송신자의 가장 이른 43 us보다 앞서, 답하는 데이터와 동시에
 //!                                   시작하는 일이 없음
+//!     USBFWD_ACK_WAIT               RTL8912AU: ACK를 잡아 두고 PPDU 끝을 기다리는 동안 0 = 지켜봄
+//!                                   (코어 하나의 40%), 1 = 끝날 때까지 잠듦 (기본), n = n us까지
+//!                                   지켜보다가 잠듦
+//!     USBFWD_UP_BATCH=0             USB 전송 하나의 프레임들을 데이터그램 하나로 묶지 않음
+//!     USBFWD_HIGHQOS=0              Windows의 전력 조절(EcoQoS)에서 빼지 않음
 use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::os::windows::io::AsRawSocket;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 
 use wirdrop_radio::dm::{Dm, rssi_of};
@@ -134,6 +143,64 @@ fn parse_vht(k: &str) -> Option<Vht> {
 fn now_ns() -> i64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_nanos() as i64
+}
+
+/// 무선 -> 호스트 데이터그램 하나에 담는 바이트 (UDP 한도 65507 아래).
+const UP_MAX: usize = 60_000;
+
+/// 스레드 사이에 나누는 Win32 자동 리셋 이벤트와, 그것이나 µs 단위 시한 가운데 먼저 오는 것을 기다리는
+/// 고해상도 타이머. Windows 타이머는 0.5 ms 단위로 올림하므로 시한은 늦을 수만 있습니다.
+mod wait {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(attr: *const c_void, manual: i32, initial: i32, name: *const u16) -> isize;
+        fn SetEvent(h: isize) -> i32;
+        fn CreateWaitableTimerExW(attr: *const c_void, name: *const u16, flags: u32, access: u32) -> isize;
+        fn SetWaitableTimer(h: isize, due: *const i64, period: i32, f: *const c_void, arg: *const c_void, resume: i32) -> i32;
+        fn WaitForMultipleObjects(n: u32, h: *const isize, all: i32, ms: u32) -> u32;
+    }
+
+    pub struct Event(isize);
+
+    impl Event {
+        pub fn new() -> Event {
+            // SAFETY: 이름 없는 자동 리셋 이벤트. 프로세스와 함께 닫힙니다.
+            Event(unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) })
+        }
+
+        pub fn set(&self) {
+            // SAFETY: 우리 이벤트.
+            unsafe { SetEvent(self.0) };
+        }
+    }
+
+    /// 이 스레드의 고해상도 타이머.
+    pub struct Timer(isize);
+
+    impl Timer {
+        pub fn new() -> Timer {
+            const HIGH_RESOLUTION: u32 = 2;
+            const ALL_ACCESS: u32 = 0x1f_0003;
+            // SAFETY: 이름 없는 타이머. 프로세스와 함께 닫힙니다.
+            Timer(unsafe { CreateWaitableTimerExW(std::ptr::null(), std::ptr::null(), HIGH_RESOLUTION, ALL_ACCESS) })
+        }
+
+        /// ev가 켜지거나 us가 지날 때까지 잠듭니다.
+        pub fn wait(&self, ev: &Event, us: i64) {
+            let due = -(us.max(1) * 10);
+            // SAFETY: 우리 타이머와 이벤트 핸들.
+            unsafe {
+                if self.0 == 0 || SetWaitableTimer(self.0, &due, 0, std::ptr::null(), std::ptr::null(), 0) == 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(us.max(1) as u64));
+                    return;
+                }
+                let h = [ev.0, self.0];
+                WaitForMultipleObjects(2, h.as_ptr(), 0, 1000);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -354,6 +421,12 @@ struct Relay {
     /// 묶음 크기를 PPDU 단위로 셉니다.
     prev_ppdu: AtomicU8,
     ppdu_bulk: AtomicBool,
+    /// 무선 -> 호스트로 모으는 프레임들 (USB 전송 하나의 것, [UP_MAX]까지), 그리고 묶는지.
+    up: Mutex<Vec<u8>>,
+    up_batch: bool,
+    /// 상대의 PPDU가 끝나면 켜는 이벤트: tx_loop가 잡아 둔 ACK와 함께 잠들어 있을 때만 (eof_wanted).
+    eof_event: wait::Event,
+    eof_wanted: AtomicBool,
 }
 
 /// 1초 창 안에서 받은 유니캐스트 수와 그중 재전송, 그리고 (보낸 이, 순서 번호)마다 받은 횟수:
@@ -509,10 +582,35 @@ impl Relay {
     }
 
     fn send_up(&self, d: &[u8]) {
-        if let Some(to) = *self.peer.lock().unwrap()
-            && self.sock.send_to(d, to).is_ok()
-        {
-            self.stats.rx_fwd.fetch_add(1, Relaxed);
+        if !self.up_batch {
+            if let Some(to) = *self.peer.lock().unwrap()
+                && self.sock.send_to(d, to).is_ok()
+            {
+                self.stats.rx_fwd.fetch_add(1, Relaxed);
+            }
+            return;
+        }
+        let mut up = self.up.lock().unwrap();
+        if up.len() + d.len() > UP_MAX {
+            self.send_batch(&mut up);
+        }
+        up.extend_from_slice(d);
+        self.stats.rx_fwd.fetch_add(1, Relaxed);
+    }
+
+    /// 모아 둔 프레임들을 호스트로 (USB 전송 하나를 다 읽었을 때, 재정렬 버퍼가 풀어 준 뒤).
+    fn flush_up(&self) {
+        if self.up_batch {
+            self.send_batch(&mut self.up.lock().unwrap());
+        }
+    }
+
+    fn send_batch(&self, up: &mut Vec<u8>) {
+        if !up.is_empty() {
+            if let Some(to) = *self.peer.lock().unwrap() {
+                let _ = self.sock.send_to(up, to);
+            }
+            up.clear();
         }
     }
 
@@ -733,7 +831,10 @@ impl Relay {
         let s = &self.stats;
         if p.ampdu_end {
             // 상대의 PPDU가 끝남: 잡아 둔 TCP ACK를 내보낼 때 (tx_loop).
-            self.eof_ns.store(now_ns(), Relaxed);
+            self.eof_ns.store(now_ns(), SeqCst);
+            if self.eof_wanted.load(SeqCst) {
+                self.eof_event.set();
+            }
             s.ppdu_ends.fetch_add(1, Relaxed);
         }
         if p.data.is_empty() {
@@ -1377,6 +1478,19 @@ fn pending(sock: &UdpSocket) -> bool {
     unsafe { ioctlsocket(SOCKET(sock.as_raw_socket() as usize), FIONREAD, &mut n) == 0 && n > 0 }
 }
 
+/// 호스트 -> 무선 데이터그램의 off에서 시작하는 프레임: (속도, ACK 없음, 프레임, 다음 off).
+fn host_record(d: &[u8], off: usize) -> Option<(u8, bool, &[u8], usize)> {
+    match d.get(off)? {
+        1 if off == 0 && d.len() >= 4 + 10 => Some((d[1], d[2] & 1 != 0, &d[4..], d.len())),
+        2 if d.len() >= off + 6 => {
+            let len = u16::from_le_bytes([d[off + 4], d[off + 5]]) as usize;
+            let end = off + 6 + len;
+            (len >= 10 && end <= d.len()).then(|| (d[off + 1], d[off + 2] & 1 != 0, &d[off + 6..end], end))
+        }
+        _ => None,
+    }
+}
+
 /// 받을 데이터그램이 생길 때까지 최대 `ms` 밀리초 기다립니다. 소켓에 받기 시간 제한(SO_RCVTIMEO)을 걸고
 /// 기다리면 Windows는 시간이 다 되는 바로 그때 도착한 데이터그램을 가끔 삼킵니다: 1 ms 제한으로 20만 개 중
 /// 7~159개. 엔진이 보낸 TCP 세그먼트가 그렇게 사라지면 Windows TCP가 재전송하며 혼잡 창을 줄여, PC→iPhone이
@@ -1407,6 +1521,31 @@ fn raise_thread() {
     let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
 }
 
+/// 이 프로세스를 Windows의 전력 조절(EcoQoS)에서 뺍니다: 창 없이 도는 우리를 Windows는 뒤쪽 일로 보고
+/// 효율 코어와 낮은 클럭에 둘 수 있는데, 프레임마다 깨어나는 이 스레드들은 그만큼 늦어집니다.
+fn full_speed() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        StateMask: 0,
+    };
+    // SAFETY: 우리 프로세스의 의사 핸들과 그 크기의 구조체.
+    if let Err(e) = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &state as *const PROCESS_POWER_THROTTLING_STATE as *const _,
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    } {
+        log!("power throttling: {e}");
+    }
+}
+
 fn main() {
     // 드라이버 자신의 진행 줄(올리기, 보정)도 우리 것처럼 stderr로 갑니다.
     tracing_subscriber::fmt()
@@ -1427,6 +1566,9 @@ fn run() -> io::Result<()> {
     // 기다립니다.
     // SAFETY: 평범한 호출.
     unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+    if env_num::<u32>("USBFWD_HIGHQOS").unwrap_or(1) != 0 {
+        full_speed();
+    }
     {
         use windows::Win32::System::Threading::{GetCurrentProcess, HIGH_PRIORITY_CLASS, SetPriorityClass};
         // SAFETY: 우리 프로세스 자신의 우선순위 클래스.
@@ -1575,6 +1717,10 @@ fn run() -> io::Result<()> {
         answers_paused: Mutex::new(None),
         restart: AtomicBool::new(false),
         ack_quiet_us,
+        up: Mutex::new(Vec::with_capacity(UP_MAX)),
+        up_batch: env_num::<u32>("USBFWD_UP_BATCH").unwrap_or(1) != 0,
+        eof_event: wait::Event::new(),
+        eof_wanted: AtomicBool::new(false),
     };
     if tx_ba {
         if radio.rtw89().is_some() {
@@ -1611,7 +1757,7 @@ fn run() -> io::Result<()> {
     let mut restarts: Vec<Instant> = Vec::new();
     loop {
         std::thread::scope(|s| {
-            let rx_thread = s.spawn(|| {
+            let rx_thread = std::thread::Builder::new().name("rx".into()).spawn_scoped(s, || {
                 raise_thread();
                 let mut rx = match radio.receiver(8) {
                     Ok(rx) => rx,
@@ -1628,9 +1774,20 @@ fn run() -> io::Result<()> {
                         }
                         relay.stop.store(true, Relaxed);
                     }
+                    relay.flush_up();
                 }
             });
-            s.spawn(|| watchdog(&radio, &relay));
+            let rx_thread = match rx_thread {
+                Ok(t) => t,
+                Err(e) => {
+                    log!("receive thread: {e}");
+                    relay.stop.store(true, Relaxed);
+                    return;
+                }
+            };
+            let _ = std::thread::Builder::new()
+                .name("watchdog".into())
+                .spawn_scoped(s, || watchdog(&radio, &relay));
             raise_thread();
             tx_loop(&radio, &relay, stop_file.clone(), bw_code, vht, ack_vht, he_data, ack_hold_us);
             relay.stop.store(true, Relaxed);
@@ -1765,7 +1922,7 @@ fn tx_loop(
     ack_hold_us: u64,
 ) {
     const BATCH: usize = 32;
-    let mut buf = vec![0u8; 16384];
+    let mut buf = vec![0u8; 65536];
     // 프레임, 속도, A-MPDU, ACK 없음, 송신 보고 번호
     type Queued = (Vec<u8>, TxRate, bool, bool, Option<u8>, bool);
     let mut pool: Vec<Queued> = Vec::with_capacity(BATCH);
@@ -1821,6 +1978,19 @@ fn tx_loop(
     }
     // 마지막으로 ACK를 내보낸 시각 (now_ns): 그 뒤에 끝난 PPDU만 셉니다.
     let mut released_ns = 0i64;
+    // 잡아 둔 ACK와 함께 PPDU 끝을 기다리는 방법 (USBFWD_ACK_WAIT). 지켜보면 받는 동안 코어 하나의 40%를
+    // 씁니다. 잠들면 PPDU가 끝날 때 rx 스레드가 깨우고, 그 뒤 ack_eof까지만 지켜봅니다. 그동안 호스트가
+    // 보낸 것은 깨어나서 읽습니다: 상대의 PPDU가 전파를 차지하는 동안이라 어차피 나가지 못합니다. PPDU 끝을
+    // 보지 않는 RTL8822B는 µs 단위의 조용한 시간을 재야 해서 지켜봅니다.
+    let ack_wait = if ack_eof > 0 {
+        env_num::<i64>("USBFWD_ACK_WAIT").unwrap_or(1).max(0)
+    } else {
+        0
+    };
+    let timer = wait::Timer::new();
+    // 할 일이 없을 때 깨어나는 간격(ms): 재정렬 버퍼의 시한(80 ms)과 멈춘 창을 봅니다. 호스트가 보낸 것은
+    // 기다리지 않고 바로 깨웁니다. USBFWD_ACK_POLL=0으로 ACK를 잡아 둔 동안은 1 ms.
+    const IDLE_MS: i32 = 10;
     let release = |pend_since: Instant, released_ns: i64| -> bool {
         let now = now_ns();
         let eof = relay.eof_ns.load(Relaxed);
@@ -1911,9 +2081,21 @@ fn tx_loop(
                 if release(pend_since, released_ns) {
                     break Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
-                std::thread::yield_now();
+                let eof_seen = relay.eof_ns.load(SeqCst) > released_ns;
+                if ack_wait == 0 || eof_seen || ack_wait > 1 && pend_since.elapsed() < Duration::from_micros(ack_wait as u64) {
+                    std::thread::yield_now();
+                    continue;
+                }
+                // PPDU가 끝나거나 조용한 시간, 잡아 두는 한도가 될 때까지.
+                relay.eof_wanted.store(true, SeqCst);
+                if relay.eof_ns.load(SeqCst) <= released_ns {
+                    let quiet = relay.last_rx_ns.load(Relaxed) + relay.ack_quiet_us * 1000 - now_ns();
+                    let hold = ack_hold_us as i64 * 1000 - pend_since.elapsed().as_nanos() as i64;
+                    timer.wait(&relay.eof_event, quiet.min(hold) / 1000);
+                }
+                relay.eof_wanted.store(false, SeqCst);
             }
-        } else if readable(&relay.sock, 1) {
+        } else if readable(&relay.sock, if pend.is_some() { 1 } else { IDLE_MS }) {
             relay.sock.recv_from(&mut buf)
         } else {
             Err(io::Error::from(io::ErrorKind::WouldBlock))
@@ -1921,7 +2103,11 @@ fn tx_loop(
         let now = Instant::now();
         let ack_quiet_us = relay.ack_quiet_us;
         if relay.reorder_ms > 0 {
+            let before = relay.stats.rx_fwd.load(Relaxed);
             relay.ro_tick(now);
+            if relay.stats.rx_fwd.load(Relaxed) != before {
+                relay.flush_up();
+            }
         }
         for (peer, ssn) in relay.stalled_windows() {
             let n = relay.stats.bar_sent.fetch_add(1, Relaxed);
@@ -1965,10 +2151,9 @@ fn tx_loop(
         match got {
             Ok((n, from)) => {
                 *relay.peer.lock().unwrap() = Some(from);
-                if n >= 4 + 10 && buf[0] == 1 {
-                    let rate = buf[1];
-                    let noack = buf[2] & 1 != 0;
-                    let f = &buf[4..n];
+                let mut off = 0;
+                while let Some((rate, noack, f, next)) = host_record(&buf[..n], off) {
+                    off = next;
                     let ack = (f[4] & 1 == 0).then(|| pure_ack(f)).flatten();
                     if ack.is_some() {
                         ack_latency(relay, &relay.ack_host_us);

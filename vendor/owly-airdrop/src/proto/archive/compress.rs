@@ -4,7 +4,6 @@
 //! compresses.
 
 use std::fmt;
-use std::io::Write;
 
 use flate2::{Compress, Compression, Crc, Decompress, FlushCompress, FlushDecompress, Status};
 
@@ -377,55 +376,187 @@ impl DvZipDecoder {
 }
 
 /// Compresses an archive as it's written. `write` and `finish` return the
-/// compressed bytes produced so far.
+/// compressed bytes produced so far. Both compressions go in pieces
+/// ([DVZIP_PIECE], [GZIP_PIECE]), each deflated or stored as [Probe] decides.
 pub struct Encoder {
-    kind: EncoderKind,
+    kind: Compressor,
+    level: Compression,
+    piece_len: usize,
+    piece: Vec<u8>,
+    probe: Probe,
+    /// gzip: deflating since the last stored piece, sync-flushed after each
+    /// piece. A fresh one follows each stored run, so none refers back into
+    /// bytes it didn't see.
+    deflate: Option<Compress>,
+    crc: Crc,
+    started: bool,
 }
 
-enum EncoderKind {
-    Gzip(flate2::write::GzEncoder<Vec<u8>>),
-    DvZip { piece: Vec<u8>, level: Compression },
+/// Whether to try deflating the next piece. Video, photos and archives don't
+/// shrink, and deflating them anyway took most of a send's CPU (a 1.26 GB
+/// HEVC video to an iPhone at 77 MB/s: 40% of a core for the whole send).
+/// After a piece that doesn't shrink, the next ones are stored as they are
+/// (DVZ-1, as an iPhone sends a photo's bytes; stored deflate blocks in
+/// gzip), twice as many after each further miss, up to [MAX_STORE_RUN]; each
+/// file is tried afresh.
+#[derive(Debug, Default, Clone, Copy)]
+struct Probe {
+    misses: u32,
+    store_left: u32,
 }
+
+/// At most this many pieces (4 MB of DVZip, 16 MB of gzip) are stored
+/// between two tries.
+const MAX_STORE_RUN: u32 = 63;
+
+/// gzip pieces: four whole stored blocks (at most 65535 bytes each). 64 KiB
+/// pieces left a 1-byte block after every 65535, and a 1.26 GB video then
+/// reached an iPhone at 52 to 56 MB/s instead of 73 to 75.
+const GZIP_PIECE: usize = 4 * 0xffff;
+
+impl Probe {
+    /// Whether to try deflating the next piece.
+    fn try_next(&mut self) -> bool {
+        if self.store_left == 0 {
+            return true;
+        }
+        self.store_left -= 1;
+        false
+    }
+
+    /// Whether deflating a piece of `len` bytes into `deflated` saved at
+    /// least a 64th of it, so it's kept.
+    fn shrank(&mut self, len: usize, deflated: usize) -> bool {
+        if deflated + len / 64 < len {
+            self.misses = 0;
+            return true;
+        }
+        self.misses = (self.misses + 1).min(MAX_STORE_RUN.ilog2() + 1);
+        self.store_left = (1 << self.misses) - 1;
+        false
+    }
+}
+
+/// The gzip header flate2 writes at level 1, as before.
+const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 4, 255];
 
 impl Encoder {
     pub fn new(kind: Compressor, level: Compression) -> Self {
-        let kind = match kind {
-            Compressor::Gzip => EncoderKind::Gzip(flate2::write::GzEncoder::new(Vec::new(), level)),
-            Compressor::DvZip => EncoderKind::DvZip {
-                piece: Vec::with_capacity(DVZIP_PIECE),
-                level,
-            },
+        let piece_len = match kind {
+            Compressor::DvZip => DVZIP_PIECE,
+            Compressor::Gzip => GZIP_PIECE,
         };
-        Encoder { kind }
-    }
-
-    pub fn write(&mut self, mut data: &[u8]) -> Vec<u8> {
-        match &mut self.kind {
-            EncoderKind::Gzip(gz) => {
-                gz.write_all(data).expect("writing to a Vec can't fail");
-                std::mem::take(gz.get_mut())
-            }
-            EncoderKind::DvZip { piece, level } => {
-                let mut out = Vec::new();
-                while !data.is_empty() {
-                    let n = data.len().min(DVZIP_PIECE - piece.len());
-                    piece.extend_from_slice(&data[..n]);
-                    data = &data[n..];
-                    if piece.len() == DVZIP_PIECE {
-                        out.extend(dvzip_chunk(piece, *level));
-                        piece.clear();
-                    }
-                }
-                out
-            }
+        Encoder {
+            kind,
+            level,
+            piece_len,
+            piece: Vec::with_capacity(piece_len),
+            probe: Probe::default(),
+            deflate: None,
+            crc: Crc::new(),
+            started: false,
         }
     }
 
-    pub fn finish(self) -> Vec<u8> {
+    /// A new file's bytes come next: they're tried from their first piece,
+    /// whatever the last file was.
+    pub fn next_file(&mut self) {
+        self.probe = Probe::default();
+    }
+
+    pub fn write(&mut self, mut data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.start(&mut out);
+        while !data.is_empty() {
+            let n = data.len().min(self.piece_len - self.piece.len());
+            self.piece.extend_from_slice(&data[..n]);
+            data = &data[n..];
+            if self.piece.len() == self.piece_len {
+                self.flush_piece(&mut out);
+            }
+        }
+        out
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.piece.len() + 64);
+        self.start(&mut out);
+        if !self.piece.is_empty() {
+            self.flush_piece(&mut out);
+        }
+        if self.kind == Compressor::Gzip {
+            // The last block, stored and empty, then CRC-32 and size.
+            out.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
+            out.extend_from_slice(&self.crc.sum().to_le_bytes());
+            out.extend_from_slice(&self.crc.amount().to_le_bytes());
+        }
+        out
+    }
+
+    fn start(&mut self, out: &mut Vec<u8>) {
+        if !self.started && self.kind == Compressor::Gzip {
+            out.extend_from_slice(&GZIP_HEADER);
+        }
+        self.started = true;
+    }
+
+    fn flush_piece(&mut self, out: &mut Vec<u8>) {
+        let piece = std::mem::take(&mut self.piece);
         match self.kind {
-            EncoderKind::Gzip(gz) => gz.finish().expect("writing to a Vec can't fail"),
-            EncoderKind::DvZip { piece, level } if !piece.is_empty() => dvzip_chunk(&piece, level),
-            EncoderKind::DvZip { .. } => Vec::new(),
+            Compressor::DvZip => {
+                if self.probe.try_next() {
+                    let deflated = dvzip_chunk(&piece, self.level);
+                    if self.probe.shrank(piece.len(), deflated.len() - 4) {
+                        out.extend_from_slice(&deflated);
+                        self.piece = piece;
+                        self.piece.clear();
+                        return;
+                    }
+                }
+                out.extend_from_slice(&(piece.len() as u32 | STORED).to_be_bytes());
+                out.extend_from_slice(&piece);
+            }
+            Compressor::Gzip => {
+                self.crc.update(&piece);
+                if self.probe.try_next() {
+                    let level = self.level;
+                    let z = self.deflate.get_or_insert_with(|| Compress::new(level, false));
+                    let start = out.len();
+                    deflate_synced(z, &piece, out);
+                    if self.probe.shrank(piece.len(), out.len() - start) {
+                        self.piece = piece;
+                        self.piece.clear();
+                        return;
+                    }
+                    out.truncate(start);
+                    self.deflate = None;
+                }
+                // Stored blocks: a sync flush, or the header, left the stream on a byte.
+                for block in piece.chunks(0xffff) {
+                    let len = block.len() as u16;
+                    out.push(0);
+                    out.extend_from_slice(&len.to_le_bytes());
+                    out.extend_from_slice(&(!len).to_le_bytes());
+                    out.extend_from_slice(block);
+                }
+            }
+        }
+        self.piece = piece;
+        self.piece.clear();
+    }
+}
+
+/// Deflates all of `input` onto `out` and sync-flushes, ending on a byte
+/// with the stream open.
+fn deflate_synced(z: &mut Compress, input: &[u8], out: &mut Vec<u8>) {
+    let start = z.total_in();
+    loop {
+        out.reserve(input.len() + 1024);
+        let done = (z.total_in() - start) as usize;
+        z.compress_vec(&input[done..], out, FlushCompress::Sync)
+            .expect("compressing into a Vec can't fail");
+        if (z.total_in() - start) as usize == input.len() && out.len() < out.capacity() {
+            break;
         }
     }
 }
@@ -453,6 +584,7 @@ pub fn dvzip_chunk(piece: &[u8], level: Compression) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::io::Write;
 
     /// Decodes a whole stream with a small output buffer.
     pub(crate) fn decode_all(kind: Compressor, mut input: &[u8]) -> Result<Vec<u8>, Error> {
@@ -531,11 +663,95 @@ pub(crate) mod tests {
     pub(crate) fn chunk_count(mut stream: &[u8]) -> usize {
         let mut n = 0;
         while !stream.is_empty() {
-            let len = u32::from_be_bytes(stream[..4].try_into().unwrap()) as usize;
+            let len = (u32::from_be_bytes(stream[..4].try_into().unwrap()) & !STORED) as usize;
             stream = &stream[4 + len..];
             n += 1;
         }
         n
+    }
+
+    /// How many of the stream's chunks are stored.
+    fn stored_count(mut stream: &[u8]) -> usize {
+        let mut n = 0;
+        while !stream.is_empty() {
+            let raw = u32::from_be_bytes(stream[..4].try_into().unwrap());
+            n += (raw & STORED != 0) as usize;
+            stream = &stream[4 + (raw & !STORED) as usize..];
+        }
+        n
+    }
+
+    /// Bytes that don't compress, as a video's.
+    fn noise(n: usize) -> Vec<u8> {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gzip_stores_pieces_that_dont_shrink() {
+        let video = noise(100 * DVZIP_PIECE + 123);
+        let text = sample();
+        let mut enc = Encoder::new(Compressor::Gzip, Compression::fast());
+        let mut stream = Vec::new();
+        for part in video.chunks(30_000) {
+            stream.extend(enc.write(part));
+        }
+        enc.next_file();
+        stream.extend(enc.write(&text));
+        stream.extend(enc.finish());
+
+        let mut whole = video.clone();
+        whole.extend_from_slice(&text);
+        assert_eq!(decode_all(Compressor::Gzip, &stream).unwrap(), whole);
+        let mut other = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&stream[..]), &mut other).unwrap();
+        assert_eq!(other, whole);
+        // The video costs only block headers; the text still compresses.
+        assert!(stream.len() < video.len() + text.len() / 2);
+        if let Some(path) = std::env::var_os("OWLY_DUMP_GZIP") {
+            std::fs::write(&path, &stream).unwrap();
+            let mut raw = path;
+            raw.push(".raw");
+            std::fs::write(raw, &whole).unwrap();
+        }
+    }
+
+
+    #[test]
+    fn dvzip_stores_pieces_that_dont_shrink() {
+        let video = noise(100 * DVZIP_PIECE + 123);
+        let text = sample();
+        let mut enc = Encoder::new(Compressor::DvZip, Compression::fast());
+        let mut stream = Vec::new();
+        for part in video.chunks(30_000) {
+            stream.extend(enc.write(part));
+        }
+        // The text starts a piece of its own.
+        stream.extend(enc.write(&[0; DVZIP_PIECE - 123]));
+        let video_chunks = stream.clone();
+        enc.next_file();
+        stream.extend(enc.write(&text));
+        stream.extend(enc.finish());
+
+        let mut whole = video.clone();
+        whole.extend_from_slice(&[0; DVZIP_PIECE - 123]);
+        whole.extend_from_slice(&text);
+        assert_eq!(decode_all(Compressor::DvZip, &stream).unwrap(), whole);
+        // Every piece of the video is stored, even the last, whose zeros
+        // weren't tried.
+        assert_eq!(chunk_count(&video_chunks), 101);
+        assert_eq!(stored_count(&video_chunks), 101);
+        // The text after it compresses again.
+        let text_chunks = &stream[video_chunks.len()..];
+        assert_eq!(stored_count(text_chunks), 0);
+        assert!(text_chunks.len() < text.len() / 2);
     }
 
     /// A stored chunk (DVZ-1).

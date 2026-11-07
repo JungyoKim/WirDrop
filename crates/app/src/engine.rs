@@ -39,6 +39,7 @@ struct Inbox {
 pub fn main() -> io::Result<()> {
     crate::paths::init_log("engine");
     wirdrop::init_tls();
+    crate::win::full_speed();
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let result = rt.block_on(run());
     if let Err(e) = &result {

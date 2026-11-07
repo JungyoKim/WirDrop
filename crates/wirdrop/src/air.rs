@@ -7,6 +7,11 @@
 //! - 호스트 → 무선: 1, 속도 (500 kbit/s 단위, 또는 0x80 | HT MCS), ACK 없음 표시, 0, 그다음 프레임.
 //!
 //! 0 네 바이트짜리 데이터그램은 호스트가 어디서 듣는지 중계기에 알립니다.
+//!
+//! 무선 → 호스트 데이터그램에는 중계기가 USB 전송 하나에서 꺼낸 프레임들이 잇달아 들고, 호스트 → 무선은
+//! 2, 속도, ACK 없음 표시, 0, 프레임 길이 (u16 LE), 프레임을 잇달아 담습니다: 깨어날 때마다 쌓인 것을 한
+//! 데이터그램으로 (받기 1.26 GB에 프레임마다 시스템 호출과 스레드 깨우기가 양쪽에 수십만 번이었습니다).
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::windows::io::AsRawSocket;
@@ -22,9 +27,15 @@ use tokio::sync::mpsc;
 /// 묶어 보내는 A-MSDU(약 5.5 KB)가 열 개 남짓만 들어가서, 받는 스레드가 1 ms만 밀려도 넘친
 /// 프레임이 아무 기록 없이 버려지고 iPhone은 그 구멍마다 TCP를 다시 보내며 속도를 줄입니다.
 const SOCK_BUF: i32 = 8 << 20;
+/// 호스트 → 무선 데이터그램 하나에 담는 바이트 (UDP 한도 65507 아래).
+const OUT_MAX: usize = 60_000;
 
 pub struct UdpAir {
-    rx: mpsc::Receiver<Received>,
+    rx: mpsc::Receiver<Vec<Received>>,
+    /// 받는 스레드가 한꺼번에 넘긴 것 가운데 남은 프레임.
+    queue: VecDeque<Received>,
+    /// 다음 flush까지 모으는 호스트 → 무선 프레임들.
+    out: Vec<u8>,
     sock: UdpSocket,
     peer: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -39,37 +50,48 @@ impl UdpAir {
         let (before, after) = tune(&sock);
         tracing::info!("UDP radio: socket buffer {} KB -> {} KB", before / 1024, after / 1024);
         sock.send_to(&[0, 0, 0, 0], peer)?;
-        let (rx_in, rx) = mpsc::channel(8192);
+        let (rx_in, rx) = mpsc::channel::<Vec<Received>>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         let got = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
         let (reader, stopped, n_got, n_dropped) = (sock.try_clone()?, stop.clone(), got.clone(), dropped.clone());
         std::thread::Builder::new().name("udp-air-rx".into()).spawn(move || {
-            let mut buf = vec![0u8; 9000];
+            let mut buf = vec![0u8; 65536];
             while !stopped.load(Relaxed) {
                 // 멈추라는 표시를 보려고 200 ms마다 깨어납니다 (받기 시간 제한은 데이터그램을 삼킵니다: [readable]).
                 if !readable(&reader, 200) {
                     continue;
                 }
-                let Ok((n, _)) = reader.recv_from(&mut buf) else { continue };
-                if n < 4 || buf[0] != 1 {
+                // 와 있는 데이터그램을 모두 한 묶음으로: 노드를 한 번만 깨웁니다.
+                let mut batch = Vec::new();
+                while let Ok((n, _)) = reader.recv_from(&mut buf) {
+                    let at = Instant::now();
+                    let mut off = 0;
+                    while off + 4 <= n && buf[off] == 1 {
+                        let len = u16::from_le_bytes([buf[off + 2], buf[off + 3]]) as usize;
+                        if off + 4 + len > n {
+                            break;
+                        }
+                        let rssi = buf[off + 1] as i8;
+                        batch.push(Received {
+                            bytes: buf[off + 4..off + 4 + len].to_vec(),
+                            rssi: (rssi != -128).then_some(rssi),
+                            received_at: Some(at),
+                        });
+                        off += 4 + len;
+                    }
+                    if batch.len() >= 256 || !pending(&reader) {
+                        break;
+                    }
+                }
+                if batch.is_empty() {
                     continue;
                 }
-                n_got.fetch_add(1, Relaxed);
-                let len = u16::from_le_bytes([buf[2], buf[3]]) as usize;
-                if 4 + len > n {
-                    continue;
-                }
-                let rssi = buf[1] as i8;
-                let f = &buf[4..4 + len];
-                let frame = Received {
-                    bytes: f.to_vec(),
-                    rssi: (rssi != -128).then_some(rssi),
-                    received_at: Some(Instant::now()),
-                };
+                let n = batch.len() as u64;
+                n_got.fetch_add(n, Relaxed);
                 // 받는 쪽이 밀리면 버립니다: AWDL 노드가 늦게 받는 것보다 낫습니다.
-                if rx_in.try_send(frame).is_err() {
-                    n_dropped.fetch_add(1, Relaxed);
+                if rx_in.try_send(batch).is_err() {
+                    n_dropped.fetch_add(n, Relaxed);
                 }
             }
         })?;
@@ -78,6 +100,8 @@ impl UdpAir {
         // 루프백 UDP 보내기는 막히지 않습니다 (받는 쪽이 가득 차면 거기서 버립니다).
         Ok(UdpAir {
             rx,
+            queue: VecDeque::new(),
+            out: Vec::with_capacity(OUT_MAX + 4096),
             sock,
             peer,
             stop,
@@ -129,9 +153,30 @@ fn readable(sock: &UdpSocket, ms: i32) -> bool {
     }
 }
 
+/// 바로 받을 데이터그램이 있는지.
+fn pending(sock: &UdpSocket) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{FIONREAD, ioctlsocket};
+    let mut n = 0u32;
+    // SAFETY: 우리 소켓에 대한 FIONREAD.
+    unsafe { ioctlsocket(sock.as_raw_socket() as usize, FIONREAD, &mut n) == 0 && n > 0 }
+}
+
 impl Air for UdpAir {
     async fn recv(&mut self) -> io::Result<Received> {
-        self.rx.recv().await.ok_or_else(|| io::Error::other("the UDP radio stopped"))
+        if let Some(f) = self.queue.pop_front() {
+            return Ok(f);
+        }
+        // 기다린 뒤 돌려주기까지 다른 await가 없으므로, select!가 이 future를 버려도 프레임을 잃지 않습니다.
+        let batch = self.rx.recv().await.ok_or_else(|| io::Error::other("the UDP radio stopped"))?;
+        self.queue.extend(batch);
+        self.queue.pop_front().ok_or_else(|| io::Error::other("an empty batch"))
+    }
+
+    fn try_recv(&mut self) -> Option<Received> {
+        if self.queue.is_empty() {
+            self.queue.extend(self.rx.try_recv().ok()?);
+        }
+        self.queue.pop_front()
     }
 
     fn send(&mut self, frame: Frame) -> Result<(), Frame> {
@@ -139,17 +184,27 @@ impl Air for UdpAir {
             TxRate::Legacy(r) => r,
             TxRate::Ht { mcs, .. } => 0x80 | (mcs & 0x7f),
         };
-        let mut d = Vec::with_capacity(4 + frame.bytes.len());
-        d.extend_from_slice(&[1, rate, frame.no_ack as u8, 0]);
-        d.extend_from_slice(&frame.bytes);
-        match self.sock.send_to(&d, self.peer) {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(frame),
-            Err(e) => {
-                tracing::warn!("UDP radio send failed: {e}");
-                Ok(())
-            }
+        if self.out.len() + 6 + frame.bytes.len() > OUT_MAX {
+            self.flush();
         }
+        let len = (frame.bytes.len() as u16).to_le_bytes();
+        self.out.extend_from_slice(&[2, rate, frame.no_ack as u8, 0, len[0], len[1]]);
+        self.out.extend_from_slice(&frame.bytes);
+        // 동기 TLV와 타임스탬프를 담은 액션 프레임은 바로 내보냅니다.
+        if frame.is_action() {
+            self.flush();
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) {
+        if self.out.is_empty() {
+            return;
+        }
+        if let Err(e) = self.sock.send_to(&self.out, self.peer) {
+            tracing::warn!("UDP radio send failed: {e}");
+        }
+        self.out.clear();
     }
 }
 

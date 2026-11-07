@@ -642,6 +642,7 @@ impl<W: Write> ArchiveWriter<'_, W> {
         let header = self.encoder.write(&cpio::odc_header(&entry));
         self.out.write_all(&header)?;
         if let Some(data) = data {
+            self.encoder.next_file();
             let mut left = entry.size;
             let mut buf = vec![0; 64 << 10];
             while left > 0 {

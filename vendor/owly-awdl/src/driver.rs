@@ -36,6 +36,9 @@ const RETRY_US: u64 = 100_000;
 /// How soon to try again once the radio's queue was full.
 const RETRY_PAUSE: Duration = Duration::from_micros(500);
 const STATS_EVERY: Duration = Duration::from_secs(10);
+/// At most this many frames, or host packets, already waiting are taken
+/// after the one that woke the node, before it looks at its timers again.
+const DRAIN: usize = 32;
 
 /// A frame heard on the air.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,11 +59,21 @@ pub trait Air {
     /// frame, since the driver races it against its timers.
     fn recv(&mut self) -> impl Future<Output = io::Result<Received>>;
 
+    /// A frame heard already, without waiting, if one is: the driver takes
+    /// those queued behind the one [Air::recv] gave before it sleeps again.
+    fn try_recv(&mut self) -> Option<Received> {
+        None
+    }
+
     /// Hands a frame to the radio without waiting, at its rate and with or
     /// without an ACK as it says. Gives it back when the radio's queue is
     /// full, to be tried again; a frame the radio refuses for any other
     /// reason is the radio's to log, and dropped.
     fn send(&mut self, frame: Frame) -> Result<(), Frame>;
+
+    /// Sends what [Air::send] held back to go out together. The driver
+    /// calls it each time before it sleeps.
+    fn flush(&mut self) {}
 }
 
 /// The host's end of the link: the network interface its IPv6 sockets use
@@ -69,6 +82,11 @@ pub trait Netif {
     /// The next IPv6 packet the host sends on the link. Dropping the future
     /// loses no packet, as with [`Air::recv`].
     fn recv(&mut self) -> impl Future<Output = io::Result<Ipv6Packet>>;
+
+    /// A packet from the host already waiting, if one is, as [Air::try_recv].
+    fn try_recv(&mut self) -> Option<Ipv6Packet> {
+        None
+    }
 
     /// Hands the host a packet from a peer. One it can't take now is
     /// dropped, as a full queue would drop it.
@@ -234,6 +252,24 @@ struct Driver<A, N> {
 impl<A: Air, N: Netif> Driver<A, N> {
     fn now(&self) -> Time {
         Time(self.epoch.elapsed().as_micros() as u64 + 1)
+    }
+
+    fn receive(&mut self, rx: Received) {
+        let now = self.now();
+        let rx_time = rx.received_at.map_or(now, |at| {
+            Time(at.saturating_duration_since(self.epoch).as_micros() as u64 + 1)
+        });
+        self.handle(Input::FrameAt {
+            now,
+            rx_time,
+            rssi: rx.rssi,
+            bytes: &rx.bytes,
+        });
+    }
+
+    fn outbound(&mut self, packet: Ipv6Packet) {
+        let now = self.now();
+        self.handle(Input::Outbound { now, packet });
     }
 
     fn service_due_timer(&mut self) {
@@ -507,18 +543,25 @@ async fn run<A: Air, N: Netif>(mut d: Driver<A, N>) -> Result<(), String> {
             _ = tokio::time::sleep_until(wake) => d.service_due_timer(),
             r = d.air.recv() => match r {
                 Ok(rx) => {
-                    let now = d.now();
-                    let rx_time = rx.received_at.map_or(now, |at| {
-                        Time(at.saturating_duration_since(d.epoch).as_micros() as u64 + 1)
-                    });
-                    d.handle(Input::FrameAt { now, rx_time, rssi: rx.rssi, bytes: &rx.bytes });
+                    d.receive(rx);
+                    // Those that came with it, one wakeup for them all.
+                    for _ in 0..DRAIN {
+                        let Some(rx) = d.air.try_recv() else { break };
+                        d.receive(rx);
+                    }
                 }
                 Err(e) => return Err(e.to_string()),
             },
             r = d.netif.recv(), if d.takes_outbound() => match r {
                 Ok(packet) => {
-                    let now = d.now();
-                    d.handle(Input::Outbound { now, packet });
+                    d.outbound(packet);
+                    for _ in 0..DRAIN {
+                        if !d.takes_outbound() {
+                            break;
+                        }
+                        let Some(packet) = d.netif.try_recv() else { break };
+                        d.outbound(packet);
+                    }
                 }
                 Err(e) => return Err(e.to_string()),
             },
@@ -526,6 +569,7 @@ async fn run<A: Air, N: Netif>(mut d: Driver<A, N>) -> Result<(), String> {
             _ = peers.tick() => d.publish_peers(),
         }
         d.flush_retries();
+        d.air.flush();
     }
 }
 

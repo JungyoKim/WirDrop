@@ -74,6 +74,9 @@ use Wi-Fi 6 (HE, two streams, 80 MHz):
 | iPhone → PC | 22.2 to 24.5 s (51 to 57 MB/s) |
 | PC → iPhone | 15.7 to 20.5 s (61 to 80 MB/s, usually 76 to 80); the iPhone accepts within a second |
 
+While it does, WirDrop (usbfwd and the engine together) keeps 70 to 85% of one CPU core busy
+receiving and 20 to 30% sending, which Task Manager shows as about 3% and 1% of a 24-thread CPU.
+
 An 80 MB (79.75 MB) video with the T3U Nano:
 
 | Direction | WirDrop | First working version |

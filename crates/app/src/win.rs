@@ -150,6 +150,33 @@ pub fn prefer_power_saving_gpu() {
     }
 }
 
+/// 이 프로세스를 Windows의 전력 조절(EcoQoS)에서 뺍니다. 창 없는 엔진 서비스는 뒤쪽 일로 보여 효율
+/// 코어와 낮은 클럭에 놓일 수 있고(배터리로 도는 노트북에서 특히), 패킷마다 스레드 몇 개를 거치는
+/// 전송은 그만큼 늦어집니다.
+pub fn full_speed() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        StateMask: 0,
+    };
+    // SAFETY: 우리 프로세스의 의사 핸들과 그 크기의 구조체.
+    let r = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &state as *const PROCESS_POWER_THROTTLING_STATE as *const _,
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if let Err(e) = r {
+        tracing::warn!("power throttling: {e}");
+    }
+}
+
 /// 데스크톱에 화면이 붙은 그래픽 어댑터 수.
 fn display_adapters() -> usize {
     use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, EnumDisplayDevicesW};

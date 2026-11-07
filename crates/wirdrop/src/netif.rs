@@ -4,6 +4,7 @@
 //! AWDL 상대들은 AWDL MAC으로 만든 수정 EUI-64 링크 로컬 주소로 서로를 부르고, owly는 이 주소로
 //! 패킷을 프레임에 대응시킵니다. 그래서 awdl0에는 우리 주소 하나만 두고, Windows가 붙이는 무작위
 //! 링크 로컬 주소는 막습니다. 어댑터를 만들려면 관리자 권한이 필요합니다.
+use std::collections::VecDeque;
 use std::io;
 use std::net::Ipv6Addr;
 use std::path::Path;
@@ -50,7 +51,9 @@ impl Drop for Keep {
 pub struct WintunNetif {
     session: Arc<wintun::Session>,
     _adapter: Keep,
-    rx: mpsc::Receiver<Ipv6Packet>,
+    rx: mpsc::Receiver<Vec<Ipv6Packet>>,
+    /// 읽는 스레드가 한꺼번에 넘긴 것 가운데 남은 패킷.
+    queue: VecDeque<Ipv6Packet>,
     reader: Option<JoinHandle<()>>,
     keeper: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -101,7 +104,8 @@ impl WintunNetif {
 
         let stop = Arc::new(AtomicBool::new(false));
         let skipped = Arc::new(AtomicU64::new(0));
-        let (tx, rx) = mpsc::channel(1024);
+        // 묶음 16개: 많아야 패킷 1024개가 노드 밖에서 기다리고, 나머지는 Wintun 링에서.
+        let (tx, rx) = mpsc::channel(16);
         let (s, sk) = (session.clone(), skipped.clone());
         let reader = std::thread::Builder::new().name("awdl0-rx".into()).spawn(move || read_loop(s, tx, sk))?;
         let st = stop.clone();
@@ -113,6 +117,7 @@ impl WintunNetif {
             session,
             _adapter: Keep(Some(adapter)),
             rx,
+            queue: VecDeque::new(),
             reader: Some(reader),
             keeper: Some(keeper),
             stop,
@@ -135,7 +140,20 @@ impl WintunNetif {
 
 impl Netif for WintunNetif {
     async fn recv(&mut self) -> io::Result<Ipv6Packet> {
-        self.rx.recv().await.ok_or_else(|| io::Error::other("awdl0 closed"))
+        if let Some(p) = self.queue.pop_front() {
+            return Ok(p);
+        }
+        // 기다린 뒤 돌려주기까지 다른 await가 없어, select!가 버려도 패킷을 잃지 않습니다.
+        let batch = self.rx.recv().await.ok_or_else(|| io::Error::other("awdl0 closed"))?;
+        self.queue.extend(batch);
+        self.queue.pop_front().ok_or_else(|| io::Error::other("an empty batch"))
+    }
+
+    fn try_recv(&mut self) -> Option<Ipv6Packet> {
+        if self.queue.is_empty() {
+            self.queue.extend(self.rx.try_recv().ok()?);
+        }
+        self.queue.pop_front()
     }
 
     fn deliver(&mut self, packet: Ipv6Packet) {
@@ -173,26 +191,34 @@ impl Drop for WintunNetif {
     }
 }
 
-/// 호스트의 IPv6 패킷을 노드에 넘깁니다. 주소를 붙일 수 없는 것(IPv4, 또는 EUI-64 링크 로컬이 아닌
-/// 주소에서 온 것)은 건너뜁니다. 노드가 밀리면 막히고, 그동안 패킷은 Wintun 링에서 기다립니다.
-fn read_loop(session: Arc<wintun::Session>, tx: mpsc::Sender<Ipv6Packet>, skipped: Arc<AtomicU64>) {
-    while let Ok(packet) = session.receive_blocking() {
-        let bytes = packet.bytes();
-        let ip = if bytes.first().is_some_and(|b| b >> 4 == 6) {
-            Ipv6Packet::from_ip(bytes.to_vec())
-        } else {
-            None
-        };
-        drop(packet);
-        match ip {
-            Some(p) => {
-                if tx.blocking_send(p).is_err() {
-                    return;
+/// 호스트의 IPv6 패킷을 노드에 넘깁니다. 깨어날 때마다 링에 와 있는 것을 64개까지 한 묶음으로 넘겨
+/// 노드를 한 번만 깨웁니다. 주소를 붙일 수 없는 것(IPv4, 또는 EUI-64 링크 로컬이 아닌 주소에서 온 것)은
+/// 건너뜁니다. 노드가 밀리면 막히고, 그동안 패킷은 Wintun 링에서 기다립니다.
+fn read_loop(session: Arc<wintun::Session>, tx: mpsc::Sender<Vec<Ipv6Packet>>, skipped: Arc<AtomicU64>) {
+    while let Ok(first) = session.receive_blocking() {
+        let mut batch = Vec::with_capacity(16);
+        let mut next = Some(first);
+        while let Some(packet) = next {
+            let bytes = packet.bytes();
+            let ip = if bytes.first().is_some_and(|b| b >> 4 == 6) {
+                Ipv6Packet::from_ip(bytes.to_vec())
+            } else {
+                None
+            };
+            drop(packet);
+            match ip {
+                Some(p) => batch.push(p),
+                None => {
+                    skipped.fetch_add(1, Relaxed);
                 }
             }
-            None => {
-                skipped.fetch_add(1, Relaxed);
+            if batch.len() >= 64 {
+                break;
             }
+            next = session.try_receive().ok().flatten();
+        }
+        if !batch.is_empty() && tx.blocking_send(batch).is_err() {
+            return;
         }
     }
 }
