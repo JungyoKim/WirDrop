@@ -164,6 +164,96 @@ fn transmits(actions: &[Action]) -> Vec<&frame::Frame> {
 
 const PHONE_SEQ: [u8; SLOTS] = [149, 149, 149, 0, 0, 0, 0, 0, 6, 149, 149, 0, 0, 0, 0, 0];
 
+/// A full-size TCP segment from the phone, as a bulk transfer sends them.
+fn tcp_segment() -> Ipv6Packet {
+    let mut p = tcp_syn();
+    p.data[4..6].copy_from_slice(&(20u16 + 1200).to_be_bytes());
+    p.data[40 + 13] = 0x10;
+    p.data.extend(std::iter::repeat_n(0xa5, 1200));
+    p
+}
+
+/// `count` full-size segments from the phone, 100 µs apart from `at`.
+fn bulk_from_phone(n: &mut Node, at: Time, count: u64) -> Time {
+    let frame = data_from_phone(&tcp_segment());
+    for i in 0..count {
+        feed(n, at.plus(i * 100), &frame);
+    }
+    at.plus(count * 100)
+}
+
+/// Config::follow: while a bulk transfer runs with a peer, its slots on the other channels of our
+/// 80 MHz are announced as ours and the radio moves there at each slot's start; once it's idle,
+/// back. A few segments, as /Discover's handshake has, aren't a transfer.
+#[test]
+fn a_fixed_radio_follows_a_peer_to_its_other_channel_while_tcp_flows() {
+    let radio = RadioConstraints {
+        channel: Channel(149),
+        presence: Presence::Fixed,
+    };
+    let mut cfg = Config::new(US, "owly", radio);
+    cfg.follow = vec![Channel(153), Channel(157), Channel(161)];
+    let mut n = Node::new(cfg, START);
+    // As an iPhone on a Wi-Fi network on 161 sent it: 0 is a slot it's away, 6 is 2.4 GHz.
+    let theirs = [161, 161, 149, 0, 0, 0, 0, 161, 6, 161, 149, 161, 0, 0, 0, 161];
+    let ours = [161, 161, 149, 149, 149, 149, 149, 161, 149, 161, 149, 161, 149, 149, 149, 161];
+    let t = meet(&mut n, &seq(theirs));
+    let tunes = |a: &[Action]| a.iter().filter_map(|a| match a { Action::Tune(c) => Some(c.0), _ => None }).collect::<Vec<_>>();
+    // Nothing flows yet.
+    let a = tick(&mut n, t.plus(100_000));
+    assert_eq!(n.following(), None);
+    assert!(tunes(&a).is_empty());
+    assert_eq!(n.sequence().channels(), [149; SLOTS]);
+
+    let t = t.plus(200_000);
+    feed(&mut n, t, &data_from_phone(&tcp_syn()));
+    let t = bulk_from_phone(&mut n, t, 8);
+    assert!(tunes(&tick(&mut n, t.plus(60_000))).is_empty());
+    assert_eq!(n.following(), None, "a handshake isn't a transfer");
+
+    let t = bulk_from_phone(&mut n, t.plus(60_000), 64);
+    let mut at = t.plus(60_000);
+    let mut tuned = 149;
+    for a in tunes(&tick(&mut n, at)) {
+        tuned = a;
+    }
+    assert_eq!(n.following().map(|(m, s)| (m, s.channels())), Some((PHONE, ours)));
+    assert_eq!(n.sequence().channels(), ours);
+    assert_eq!(tuned, ours[n.clock().slot(at)]);
+    // The node asks to be woken at each slot's start, and moves the radio when the channel changes.
+    for _ in 0..32 {
+        // The transfer goes on.
+        bulk_from_phone(&mut n, at, 1);
+        let a = tick(&mut n, at);
+        let Some(Action::ArmTimer(next)) = a.last() else { panic!("no timer") };
+        assert!(next.since(at) <= n.clock().next_slot_us(at));
+        at = at.plus(n.clock().next_slot_us(at) + 500);
+        for c in tunes(&tick(&mut n, at)) {
+            tuned = c;
+        }
+        assert_eq!(tuned, ours[n.clock().slot(at)]);
+    }
+
+    // A peer on 161 in every slot: slot 10 stays ours, so the others still hear us.
+    feed(&mut n, at, &phone_frame(subtype::MIF, &seq([161; SLOTS]), 400, 64));
+    let at = bulk_from_phone(&mut n, at, 64);
+    for c in tunes(&tick(&mut n, at.plus(60_000))) {
+        tuned = c;
+    }
+    let mut all = [161; SLOTS];
+    all[10] = 149;
+    assert_eq!(n.sequence().channels(), all);
+
+    // A second and a half without a bulk segment: back on our own channel.
+    let quiet = at.plus(1_600_000);
+    for c in tunes(&tick(&mut n, quiet)) {
+        tuned = c;
+    }
+    assert_eq!(n.following(), None);
+    assert_eq!(n.sequence().channels(), [149; SLOTS]);
+    assert_eq!(tuned, 149);
+}
+
 // spec: AWDL-12
 #[test]
 fn a_fixed_radio_advertises_its_channel_in_every_slot() {

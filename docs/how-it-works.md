@@ -87,8 +87,16 @@ An 80 MB (79.75 MB) video with the T3U Nano:
 What limits it now is the shared channel. The iPhone spends only part of a transfer on it (65 to
 90% in our measurements), and nothing moves while it's away.
 
+An iPhone on a Wi-Fi network spends part of each transfer on that network's channel. When it's
+153, 157 or 161, in the same 80 MHz as 149, WirDrop follows the iPhone there for those slots
+while a transfer runs, moving only the adapter's primary channel (under a millisecond). With an
+iPhone 17 Pro on a network on 153 and the T3U Nano, a 1.26 GB video reached the PC in 51 s
+(24.4 MB/s) instead of 173 s (7.3 MB/s), as fast as with the network on 149.
+
 ## Known limits
 
-- Two adapter models (BE6500UA and T3U Nano), on 5 GHz channel 149.
-- Speed depends on how long the iPhone stays on channel 149, which the iPhone decides.
+- Two adapter models (BE6500UA and T3U Nano), on 5 GHz channel 149, and on 153, 157 or 161 with
+  an iPhone during a transfer.
+- Speed depends on how long the iPhone stays on those channels, which the iPhone decides. An
+  iPhone on a Wi-Fi network on any other channel is reached only while it's on 149.
 - Sometimes the iPhone's share sheet needs reopening before the PC appears.

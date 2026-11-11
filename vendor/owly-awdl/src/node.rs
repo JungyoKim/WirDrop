@@ -12,7 +12,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::channel::{Channel, Sequence};
+use crate::channel::{Channel, SLOTS, Sequence};
 use crate::election::{Election, Ranking};
 use crate::frame::{self, Frame, Received};
 use crate::ip::Ipv6Packet;
@@ -62,6 +62,9 @@ pub enum Action {
     PeerDown(MacAddr),
     /// Hand this packet to the IP stack.
     Deliver(Ipv6Packet),
+    /// Move the radio to this channel, after the frames handed to it so far: one of
+    /// [Config::follow], or its own channel again.
+    Tune(Channel),
 }
 
 /// How a radio is present on AWDL: the one channel it stays on, and how.
@@ -145,6 +148,12 @@ pub struct Config {
     /// unicast as QoS data. For radios that aggregate and take the Block Ack in hardware (usbfwd
     /// with USBFWD_TX_BA).
     pub tx_addba: bool,
+    /// Channels a [Presence::Fixed] radio can also move to between two slots, quickly: those
+    /// sharing its own channel's 80 MHz, where only the primary channel changes. While TCP flows
+    /// with a peer, the node spends the slots that peer spends on one of these there too, and
+    /// announces them. An iPhone on a Wi-Fi network on channel 161 spends half its slots there,
+    /// away from our 149, and data with it moved at a third of the speed. Empty: never moves.
+    pub follow: Vec<Channel>,
 }
 
 impl Config {
@@ -170,6 +179,7 @@ impl Config {
             infra_channel: None,
             ext_flags: 0,
             tx_addba: false,
+            follow: Vec::new(),
         }
     }
 }
@@ -195,6 +205,8 @@ pub struct Stats {
     pub addba_requests: u64,
     pub addba_up: u64,
     pub addba_refused: u64,
+    /// Times the radio was moved to another channel ([Action::Tune]).
+    pub tunes: u64,
     /// Action frames ignored for coming in below the RSSI threshold, and the last such sender.
     pub rx_too_weak: u64,
     pub last_too_weak: Option<(MacAddr, i8)>,
@@ -229,6 +241,20 @@ const ECHO_PAYLOAD: &[u8] = b"owly";
 const PACKET_EXPIRY_US: u64 = 2_000_000;
 /// A held SYN waits this long for its peer to turn valid.
 const SYN_HOLD_US: u64 = 2_000_000;
+/// TCP segments this long or longer (IPv6 packet bytes) are a bulk transfer's, while they come or
+/// go at most BULK_GAP_US apart; a run of FOLLOW_BULK of them (about 90 KB) is a transfer worth
+/// following a peer's slots for ([Config::follow]). The /Discover handshake every nearby iPhone
+/// answers has a handful: counting any TCP, an iPhone on a Wi-Fi on 153 that was only being
+/// discovered was followed while the one sending to us stayed on 149.
+const BULK_SEGMENT: usize = 1000;
+const BULK_GAP_US: u64 = 1_000_000;
+const FOLLOW_BULK: u32 = 64;
+/// A peer is followed until this long after its last bulk segment; another in a bulk transfer
+/// takes its place once it's been quiet FOLLOW_KEEP_US.
+const FOLLOW_IDLE_US: u64 = 1_500_000;
+const FOLLOW_KEEP_US: u64 = 300_000;
+/// How often whom to follow, and where, is looked at again.
+const FOLLOW_CHECK_US: u64 = 50_000;
 /// Unicast packets waiting for their peer's slot at most. Beyond it the
 /// oldest is dropped, so a host should stop handing in packets while
 /// [`Node::backlog`] is this long, as legacy stopped reading `awdl0`.
@@ -254,6 +280,22 @@ const AMSDU_DEFAULT_MAX: usize = 3839;
 struct Queued {
     packet: Ipv6Packet,
     at: Time,
+}
+
+/// A TCP segment (no IPv6 extension headers before it, as AirDrop's never have).
+fn is_tcp(p: &Ipv6Packet) -> bool {
+    p.data.get(6) == Some(&6)
+}
+
+/// Counts a packet to or from `peer` toward its bulk transfer, if it's a full-size TCP segment.
+fn note_bulk(peer: &mut Peer, packet: &Ipv6Packet, now: Time) {
+    if !is_tcp(packet) || packet.data.len() < BULK_SEGMENT {
+        return;
+    }
+    peer.bulk = Some(match peer.bulk {
+        Some((t, n)) if now.since(t) <= BULK_GAP_US => (now, n.saturating_add(1)),
+        _ => (now, 1),
+    });
 }
 
 /// An AWDL node.
@@ -282,6 +324,12 @@ pub struct Node {
     /// Our Block Ack sessions toward peers (Config::tx_addba).
     ba_tx: BTreeMap<MacAddr, BaTx>,
     ba_token: u8,
+    /// The peer whose slots on [Config::follow] channels we spend with it, and the sequence we
+    /// announce meanwhile.
+    follow: Option<(MacAddr, Sequence)>,
+    next_follow: Time,
+    /// The channel the radio was last moved to.
+    tuned: u8,
 }
 
 /// Our Block Ack session toward a peer.
@@ -295,6 +343,7 @@ enum BaTx {
 impl Node {
     pub fn new(cfg: Config, now: Time) -> Node {
         let clock = Clock::new(now);
+        let tuned = cfg.radio.channel.0;
         Node {
             election: Election::own(cfg.addr),
             sequence: Sequence::fixed(cfg.radio.channel),
@@ -316,6 +365,9 @@ impl Node {
             stats: Stats::default(),
             ba_tx: BTreeMap::new(),
             ba_token: 0,
+            follow: None,
+            next_follow: now,
+            tuned,
         }
     }
 
@@ -406,6 +458,12 @@ impl Node {
     /// keeps advertising what it had meanwhile.
     pub fn no_overlap(&self) -> Option<(MacAddr, u8)> {
         self.no_overlap
+    }
+
+    /// The peer whose slots on other channels we follow ([Config::follow]), and our sequence
+    /// meanwhile.
+    pub fn following(&self) -> Option<(MacAddr, Sequence)> {
+        self.follow
     }
 
     fn next_seq(&mut self) -> u16 {
@@ -628,6 +686,11 @@ impl Node {
                 src: m.src,
                 data: m.payload.to_vec(),
             };
+            if packet.dst == self.cfg.addr
+                && let Some(p) = self.peers.get_mut(&src)
+            {
+                note_bulk(p, &packet, now);
+            }
             if valid {
                 if packet.dst == self.cfg.addr && packet.is_echo_reply(ECHO_ID) {
                     continue;
@@ -687,6 +750,9 @@ impl Node {
                 self.stats.dropped_no_peer += 1;
                 return;
             }
+            if let Some(p) = self.peers.get_mut(&packet.dst) {
+                note_bulk(p, &packet, now);
+            }
             if self.unicast.len() == UNICAST_QUEUE {
                 self.unicast.pop_front();
                 self.stats.dropped_queue_full += 1;
@@ -697,6 +763,7 @@ impl Node {
     }
 
     fn service(&mut self, now: Time, out: &mut Vec<Action>) {
+        self.service_follow(now, out);
         if now >= self.next_tick {
             self.tick(now, out);
             while self.next_tick <= now {
@@ -795,6 +862,55 @@ impl Node {
         self.adopt_sequence();
     }
 
+    /// [Config::follow]: picks the peer to follow, the one in a bulk transfer with us (the same one
+    /// while it lasts), announces its slots on those channels as ours, and moves the radio at each slot
+    /// whose channel differs from the one before. An iPhone may put any slot there, slot 0 too;
+    /// if none would be left on our own channel, slot 10 (where Apple devices meet on it) stays,
+    /// so the others keep hearing us.
+    fn service_follow(&mut self, now: Time, out: &mut Vec<Action>) {
+        if self.cfg.follow.is_empty() || !self.fixed() {
+            return;
+        }
+        let home = self.cfg.radio.channel;
+        if now >= self.next_follow {
+            self.next_follow = now.plus(FOLLOW_CHECK_US);
+            let active = |p: &&Peer| p.valid && p.bulk.is_some_and(|(t, n)| n >= FOLLOW_BULK && now.since(t) < FOLLOW_IDLE_US);
+            let kept = self
+                .follow
+                .and_then(|(m, _)| self.peers.get(&m))
+                .filter(active)
+                .filter(|p| p.bulk.is_some_and(|(t, _)| now.since(t) < FOLLOW_KEEP_US));
+            let peer = kept.or_else(|| self.peers.values().filter(active).max_by_key(|p| p.bulk.map(|(t, _)| t)));
+            let next = peer.and_then(|p| {
+                let theirs = p.sequence?;
+                let mut ours = Sequence::fixed(home);
+                let mut moved = 0;
+                for i in 0..SLOTS {
+                    let c = theirs.channel(i);
+                    if c != home.0 && self.cfg.follow.iter().any(|f| f.0 == c) {
+                        ours.slots[i] = Channel(c).slot();
+                        moved += 1;
+                    }
+                }
+                if ours.count(home.0) == 0 {
+                    ours.slots[10] = home.slot();
+                    moved -= 1;
+                }
+                (moved > 0).then_some((p.mac, ours))
+            });
+            if next != self.follow {
+                self.follow = next;
+                self.sequence = next.map_or(Sequence::fixed(home), |(_, s)| s);
+            }
+        }
+        let want = self.own_channel(self.clock.slot(now));
+        if want != 0 && want != self.tuned {
+            self.tuned = want;
+            self.stats.tunes += 1;
+            out.push(Action::Tune(Channel(want)));
+        }
+    }
+
     /// The sequence to advertise: derived from the sync master's, as the
     /// radio's presence allows.
     fn adopt_sequence(&mut self) {
@@ -806,7 +922,7 @@ impl Node {
         };
         self.no_overlap = None;
         self.sequence = match (self.cfg.radio.presence, master) {
-            (Presence::Fixed, _) | (_, None) => Sequence::fixed(home),
+            (Presence::Fixed, _) | (_, None) => self.follow.map_or(Sequence::fixed(home), |(_, s)| s),
             (Presence::Share, Some(theirs)) => {
                 let (ours, kept) = theirs.intersect(home.0);
                 if kept == 0 {
@@ -857,7 +973,10 @@ impl Node {
     /// The channel we're on in slot `slot` as far as sending goes.
     fn own_channel(&self, slot: usize) -> u8 {
         if self.fixed() {
-            self.cfg.radio.channel.0
+            match &self.follow {
+                Some((_, s)) => s.channel(slot),
+                None => self.cfg.radio.channel.0,
+            }
         } else {
             self.sequence.channel(slot)
         }
@@ -1030,6 +1149,10 @@ impl Node {
         }
         if let Some(r) = self.resume {
             t = t.min(r);
+        }
+        // At the next slot's start, to move the radio if its channel differs.
+        if self.follow.is_some() || self.tuned != self.cfg.radio.channel.0 {
+            t = t.min(now.plus(self.clock.next_slot_us(now)));
         }
         if !self.multicast.is_empty() {
             t = t.min(now.plus(self.multicast_wait(now).max(1)));

@@ -72,8 +72,11 @@ pub fn check() -> io::Result<Option<Manifest>> {
     Ok(newer(&manifest.version, CURRENT).then_some(manifest))
 }
 
-/// 버전 a가 b보다 뒤인지 ("1.2.10" > "1.2.9"; '-' 뒤는 무시).
+/// 버전 a가 b보다 뒤인지 ("1.2.10" > "1.2.9"). 숫자가 같으면 '-' 뒤가 붙은 시험판이 정식판보다 앞입니다
+/// ("0.2.13" > "0.2.13-beta.1"): 시험판을 깐 PC도 그 정식판이 나오면 받습니다.
 pub fn newer(a: &str, b: &str) -> bool {
+    let pre = |v: &str| v.split_once('-').map(|(_, p)| p.to_string());
+    let (pre_a, pre_b) = (pre(a), pre(b));
     let parts = |v: &str| -> Vec<u64> {
         v.split('-')
             .next()
@@ -85,7 +88,14 @@ pub fn newer(a: &str, b: &str) -> bool {
     let (a, b) = (parts(a), parts(b));
     let n = a.len().max(b.len());
     let at = |v: &Vec<u64>, i: usize| v.get(i).copied().unwrap_or(0);
-    (0..n).map(|i| (at(&a, i), at(&b, i))).find(|(x, y)| x != y).is_some_and(|(x, y)| x > y)
+    match (0..n).map(|i| (at(&a, i), at(&b, i))).find(|(x, y)| x != y) {
+        Some((x, y)) => x > y,
+        None => match (pre_a, pre_b) {
+            (None, Some(_)) => true,
+            (Some(x), Some(y)) => x > y,
+            _ => false,
+        },
+    }
 }
 
 // ---- 서비스 안에서
@@ -257,6 +267,32 @@ fn opened(handle: *mut c_void) -> io::Result<Internet> {
 
 /// https URL을 out으로 GET합니다 (리디렉션을 따릅니다). limit 바이트를 넘으면 오류.
 fn get(url: &str, limit: u64, out: &mut dyn Write) -> io::Result<u64> {
+    get_raw(url, limit, out).map_err(readable)
+}
+
+/// WinHTTP 오류를 읽을 수 있는 말로: Windows의 오류 문구 표에는 WinHTTP 것이 없어 "FormatMessageW() returned
+/// error 317"로만 찍힙니다.
+fn readable(e: io::Error) -> io::Error {
+    let Some(hr) = e.raw_os_error() else { return e };
+    // HRESULT_FROM_WIN32(12xxx) 또는 그 번호 그대로.
+    let code = if (hr as u32) & 0xffff_0000 == 0x8007_0000 {
+        (hr as u32) & 0xffff
+    } else {
+        hr as u32
+    };
+    let what = match code {
+        12002 => "timed out",
+        12007 => "no internet (the name didn't resolve)",
+        12029 => "no internet (can't connect)",
+        12030 => "the connection broke",
+        12175 => "the secure connection failed",
+        12000..=12200 => "WinHTTP failed",
+        _ => return e,
+    };
+    io::Error::new(e.kind(), format!("{what} (WinHTTP {code})"))
+}
+
+fn get_raw(url: &str, limit: u64, out: &mut dyn Write) -> io::Result<u64> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| io::Error::other(format!("not https: {url}")))?;
@@ -326,7 +362,19 @@ mod tests {
         assert!(newer("1.0", "0.9.9"));
         assert!(!newer("0.1.0", "0.1.0"));
         assert!(!newer("0.1.0-beta", "0.1.0"));
+        assert!(newer("0.1.0", "0.1.0-beta"));
+        assert!(newer("0.2.13", "0.2.13-beta.1"));
+        assert!(!newer("0.2.12", "0.2.13-beta.1"));
+        assert!(newer("0.2.13-beta.1", "0.2.12"));
         assert!(!newer("0.0.9", "0.1.0"));
+    }
+
+    #[test]
+    fn winhttp_errors_read_plainly() {
+        let e = readable(io::Error::from_raw_os_error(0x8007_2ee7_u32 as i32));
+        assert_eq!(e.to_string(), "no internet (the name didn't resolve) (WinHTTP 12007)");
+        let e = readable(io::Error::other("HTTP 404: x"));
+        assert_eq!(e.to_string(), "HTTP 404: x");
     }
 
     /// examples/update_sign.rs가 쓰는 꼴의 update.json을 버릴 키로 만듭니다: 서명하는 것이

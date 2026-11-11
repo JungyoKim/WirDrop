@@ -73,6 +73,20 @@ fn and_more(first: &str, more: usize) -> String {
 /// 붙은 Windows 언어의 글)를 쉬운 말로 바꿉니다.
 pub fn reason_text(reason: &str) -> String {
     let r = reason.to_ascii_lowercase();
+    // 폴더 안에 받는 기기가 못 받는 이름의 파일이 있습니다 (owly-airdrop: "<경로> has a name ...").
+    for (mark, long) in [(" has a name too long", true), (" has a name the receiver can't take", false)] {
+        if let Some(at) = reason.find(mark) {
+            let path = std::path::Path::new(&reason[..at]);
+            let name = path
+                .file_name()
+                .map_or_else(|| reason[..at].to_string(), |n| n.to_string_lossy().into_owned());
+            return if long {
+                tf!("이름이 너무 긴 파일이 있습니다: {name}", "A file's name is too long: {name}")
+            } else {
+                tf!("보낼 수 없는 이름의 파일이 있습니다: {name}", "A file's name can't be sent: {name}")
+            };
+        }
+    }
     let said = if reason.is_empty() {
         return String::new();
     } else if r.contains("acceptance timed out") {
@@ -156,6 +170,11 @@ mod tests {
         assert_eq!(
             reason_text("파일 쓰기 실패 (os error 112)"),
             t!("저장 공간이 부족합니다.", "Not enough storage.")
+        );
+        let long = r"C:\사진\여행 기록.jpg has a name too long for the receiver (300 bytes, at most 255)";
+        assert_eq!(
+            reason_text(long),
+            tf!("이름이 너무 긴 파일이 있습니다: {}", "A file's name is too long: {}", "여행 기록.jpg")
         );
     }
 }

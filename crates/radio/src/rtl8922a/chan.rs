@@ -165,6 +165,27 @@ impl Chan {
     }
 }
 
+/// R_BE_TX_SUB_BAND_VALUE: 좁은 폭으로 보낼 때의 부대역 자리와 주 20 MHz 비트맵
+/// (rtw8922a_set_channel_mac).
+fn tx_sub_band(c: &Chan) -> u32 {
+    let (sb20, sb40, sb80) = match c.bw {
+        Bw::B160 => (c.txsb(Bw::B20), c.txsb(Bw::B40), c.txsb(Bw::B80)),
+        Bw::B80 => (c.txsb(Bw::B20), c.txsb(Bw::B40), 0),
+        Bw::B40 => (c.txsb(Bw::B20), 0, 0),
+        Bw::B20 => (0, 0, 0),
+    };
+    let mut txsb = match c.bw {
+        Bw::B160 => put(0, B_BE_TXSB_20M_MASK, sb20) | put(0, B_BE_TXSB_40M_MASK, sb40) | put(0, B_BE_TXSB_80M_MASK, sb80),
+        Bw::B80 => put(0, B_BE_TXSB_20M_MASK, sb20) | put(0, B_BE_TXSB_40M_MASK, sb40),
+        Bw::B40 => put(0, B_BE_TXSB_20M_MASK, sb20),
+        Bw::B20 => 0,
+    };
+    if sb20 <= BE_PRI20_BITMAP_MAX {
+        txsb |= put(0, B_BE_PRI20_BITMAP_MASK, 1 << sb20);
+    }
+    txsb
+}
+
 /// 처음 켤 때의 채널 (rtw89가 채널을 정하기 전에 쓰는 2.4 GHz 1번).
 const BOOT_CHAN: Chan = Chan {
     band: Band::G2,
@@ -626,26 +647,14 @@ impl Rtl8922a {
 
     /// rtw8922a_set_channel_mac
     fn set_channel_mac(&self, c: &Chan) -> io::Result<()> {
-        let (sb20, sb40, sb80) = match c.bw {
-            Bw::B160 => (c.txsb(Bw::B20), c.txsb(Bw::B40), c.txsb(Bw::B80)),
-            Bw::B80 => (c.txsb(Bw::B20), c.txsb(Bw::B40), 0),
-            Bw::B40 => (c.txsb(Bw::B20), 0, 0),
-            Bw::B20 => (0, 0, 0),
+        let rf_mod = match c.bw {
+            Bw::B160 => BE_WMAC_RFMOD_160M,
+            Bw::B80 => BE_WMAC_RFMOD_80M,
+            Bw::B40 => BE_WMAC_RFMOD_40M,
+            Bw::B20 => BE_WMAC_RFMOD_20M,
         };
-        let (rf_mod, mut txsb) = match c.bw {
-            Bw::B160 => (
-                BE_WMAC_RFMOD_160M,
-                put(0, B_BE_TXSB_20M_MASK, sb20) | put(0, B_BE_TXSB_40M_MASK, sb40) | put(0, B_BE_TXSB_80M_MASK, sb80),
-            ),
-            Bw::B80 => (BE_WMAC_RFMOD_80M, put(0, B_BE_TXSB_20M_MASK, sb20) | put(0, B_BE_TXSB_40M_MASK, sb40)),
-            Bw::B40 => (BE_WMAC_RFMOD_40M, put(0, B_BE_TXSB_20M_MASK, sb20)),
-            Bw::B20 => (BE_WMAC_RFMOD_20M, 0),
-        };
-        if sb20 <= BE_PRI20_BITMAP_MAX {
-            txsb |= put(0, B_BE_PRI20_BITMAP_MASK, 1 << sb20);
-        }
         self.w8_mask(R_BE_WMAC_RFMOD, B_BE_WMAC_RFMOD_MASK, rf_mod)?;
-        self.w32(R_BE_TX_SUB_BAND_VALUE, txsb)?;
+        self.w32(R_BE_TX_SUB_BAND_VALUE, tx_sub_band(c))?;
 
         let chk = if c.band == Band::G2 {
             B_BE_BAND_MODE
@@ -658,6 +667,16 @@ impl Rtl8922a {
         let (t1, tb) = if c.bw >= Bw::B40 { (0x41, 0x41) } else { (0x3f, 0x3e) };
         self.w32_mask(R_BE_PREBKF_CFG_1, B_BE_SIFS_MACTXEN_T1_MASK, t1)?;
         self.w32_mask(R_BE_MUEDCA_EN, B_BE_SIFS_MACTXEN_TB_T1_MASK, tb)
+    }
+
+    /// 같은 중심과 폭에서 주 20 MHz 채널만 바꿉니다: MAC이 보내는 부대역, BB의 주 채널과 채널 색인.
+    /// RF, 이득, 보정 표는 중심으로 정해져 그대로라 USB 전송 몇 번이면 됩니다 (AWDL 상대의 슬롯을 따라
+    /// 80 MHz 안에서 옮길 때).
+    pub fn set_primary(&self, c: &Chan) -> io::Result<()> {
+        self.w32(R_BE_TX_SUB_BAND_VALUE, tx_sub_band(c))?;
+        let prich = if c.bw == Bw::B20 { 0 } else { c.pri_sb() };
+        self.pw32_mask(R_ANT_CHBW, B_CHBW_PRICH, prich)?;
+        self.pw32_mask(R_MAC_PIN_SEL, B_CH_IDX_SEG0, c.chan_idx())
     }
 
     /// rtw8922a_set_channel_bb

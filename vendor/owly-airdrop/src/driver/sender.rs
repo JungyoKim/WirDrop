@@ -535,10 +535,15 @@ fn children(
     for child in listed {
         check()?;
         let Some(child_name) = child.file_name().to_str().map(String::from) else {
-            return Err(invalid("file name is not UTF-8".into()));
+            return Err(invalid(format!("{} has no UTF-8 file name", child.path().display())));
         };
         if RelPath::file_name(&child_name).is_err() {
-            return Err(invalid("unsafe file name".into()));
+            // Most often one longer than the 255 bytes (85 Korean letters) a receiver takes.
+            return Err(invalid(if child_name.len() > 255 {
+                format!("{} has a name too long for the receiver ({} bytes, at most 255)", child.path().display(), child_name.len())
+            } else {
+                format!("{} has a name the receiver can't take", child.path().display())
+            }));
         }
         let meta = std::fs::symlink_metadata(child.path())?;
         if meta.file_type().is_symlink() {

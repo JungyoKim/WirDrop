@@ -143,6 +143,9 @@ const UPDATE_EVERY: Duration = Duration::from_secs(3600);
 const UPDATE_QUIET: Duration = Duration::from_secs(60);
 /// 업데이트가 실패한 뒤 다시 볼 때까지. 대개 한 번 더 하면 됩니다.
 const UPDATE_RETRY: Duration = Duration::from_secs(30 * 60);
+/// 새 릴리스를 알아보지 못했을 때 다시 알아볼 때까지. 노트북은 절전에서 깨어나 Wi-Fi가 붙기 전에
+/// 알아보곤 해서, 한 시간을 기다리면 그사이 다시 잠들어 새 버전을 며칠씩 놓쳤습니다.
+const UPDATE_CHECK_RETRY: Duration = Duration::from_secs(2 * 60);
 
 pub struct Hub {
     events: UnboundedSender<HubEvent>,
@@ -185,6 +188,8 @@ pub struct Hub {
     /// update.rs가 새 릴리스를 마지막으로 본 때, 보고 있는지, 찾은 것.
     update_checked: Option<Instant>,
     checking_update: bool,
+    /// 마지막으로 새 릴리스를 알아보지 못했습니다(인터넷 없음): [UPDATE_CHECK_RETRY] 뒤에 다시 봅니다.
+    update_check_failed: bool,
     update: Option<crate::update::Manifest>,
     /// 서비스가 업데이트를 놓는 중: 그동안 엔진은 내려가 있습니다.
     updating: bool,
@@ -231,6 +236,7 @@ pub async fn run(events: UnboundedSender<HubEvent>, mut rx: UnboundedReceiver<Hu
         started: Instant::now(),
         update_checked: None,
         checking_update: false,
+        update_check_failed: false,
         update: None,
         updating: false,
         busy_at: None,
@@ -351,6 +357,7 @@ impl Hub {
             HubEvent::SignIn(progress) => self.sign_in_progress(progress),
             HubEvent::UpdateChecked(result) => {
                 self.checking_update = false;
+                self.update_check_failed = result.is_err();
                 match result {
                     Ok(Some(manifest)) => {
                         tracing::info!("update: {} is out", manifest.version);

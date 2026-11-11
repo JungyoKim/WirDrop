@@ -8,7 +8,7 @@ use owly_awdl::{MacAddr, PeerInfo};
 use tokio::sync::watch;
 
 use crate::air::UdpAir;
-use crate::config::{Tuning, awdl_config};
+use crate::config::{Tuning, awdl_config, same_80mhz};
 use crate::netif::{self, WintunNetif};
 use crate::usbfwd::{Usbfwd, UsbfwdOptions};
 
@@ -74,7 +74,10 @@ impl Link {
     /// 스레드(tokio::task::spawn_blocking)에서 부르세요. awdl0 때문에 관리자 권한이 필요합니다.
     pub fn start(cfg: LinkConfig) -> io::Result<Link> {
         let timer = TimerPeriod::new();
-        let awdl = awdl_config(cfg.mac, &cfg.name, cfg.channel, &cfg.tuning)?;
+        let mut awdl = awdl_config(cfg.mac, &cfg.name, cfg.channel, &cfg.tuning)?;
+        if cfg.tuning.follow_channels && cfg.usbfwd.bandwidth_mhz == 80 {
+            awdl.follow = same_80mhz(cfg.channel);
+        }
         let mut usb = cfg.usbfwd.clone();
         if cfg.tuning.tx_ampdu {
             usb.env.push(("USBFWD_TX_BA".into(), "1".into()));

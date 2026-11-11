@@ -11,6 +11,8 @@
 //! 무선 → 호스트 데이터그램에는 중계기가 USB 전송 하나에서 꺼낸 프레임들이 잇달아 들고, 호스트 → 무선은
 //! 2, 속도, ACK 없음 표시, 0, 프레임 길이 (u16 LE), 프레임을 잇달아 담습니다: 깨어날 때마다 쌓인 것을 한
 //! 데이터그램으로 (받기 1.26 GB에 프레임마다 시스템 호출과 스레드 깨우기가 양쪽에 수십만 번이었습니다).
+//!
+//! 호스트 → 무선 3, 채널, 0, 0은 무선을 같은 80 MHz 안의 그 주 채널로 옮깁니다 (그 전에 보낸 프레임 뒤에).
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -20,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use owly_awdl::driver::{Air, Received};
-use owly_awdl::{Frame, TxRate};
+use owly_awdl::{Channel, Frame, TxRate};
 use tokio::sync::mpsc;
 
 /// 루프백 소켓의 받기·보내기 버퍼 (usbfwd 쪽과 같은 크기). Windows 기본값(64 KB)에는 iPhone이
@@ -205,6 +207,13 @@ impl Air for UdpAir {
             tracing::warn!("UDP radio send failed: {e}");
         }
         self.out.clear();
+    }
+
+    fn tune(&mut self, channel: Channel) {
+        self.flush();
+        if let Err(e) = self.sock.send_to(&[3, channel.0, 0, 0], self.peer) {
+            tracing::warn!("UDP radio channel change failed: {e}");
+        }
     }
 }
 

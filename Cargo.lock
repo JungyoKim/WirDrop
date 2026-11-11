@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "wirdrop-app"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "embed-resource",
  "ring",

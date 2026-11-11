@@ -8,7 +8,13 @@ impl Hub {
         if self.exiting || !crate::service::installed_here() {
             return;
         }
-        let again = if self.update_failed { UPDATE_RETRY } else { UPDATE_EVERY };
+        let again = if self.update_failed {
+            UPDATE_RETRY
+        } else if self.update_check_failed {
+            UPDATE_CHECK_RETRY
+        } else {
+            UPDATE_EVERY
+        };
         let due = match self.update_checked {
             None => self.started.elapsed() > UPDATE_FIRST,
             Some(t) => t.elapsed() > again,

@@ -38,6 +38,9 @@ pub struct Peer {
     /// whether its mDNS gets through shows here.
     pub rx_unicast: u32,
     pub rx_multicast: u32,
+    /// The bulk transfer with it, if one runs: when its last full-size TCP segment went to it or
+    /// came from it, and how many have in this run ([crate::node]'s BULK_GAP_US apart at most).
+    pub bulk: Option<(Time, u32)>,
 }
 
 /// What a host is told about a peer that has turned valid.
@@ -68,6 +71,7 @@ impl Peer {
             valid: false,
             rx_unicast: 0,
             rx_multicast: 0,
+            bulk: None,
         }
     }
 

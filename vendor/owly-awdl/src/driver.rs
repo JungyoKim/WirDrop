@@ -74,6 +74,10 @@ pub trait Air {
     /// Sends what [Air::send] held back to go out together. The driver
     /// calls it each time before it sleeps.
     fn flush(&mut self) {}
+
+    /// Moves the radio to `channel` ([crate::Action::Tune]), after the frames handed to it so
+    /// far. A radio that can't ignores it; the node only asks for [crate::Config::follow].
+    fn tune(&mut self, _channel: crate::Channel) {}
 }
 
 /// The host's end of the link: the network interface its IPv6 sockets use
@@ -160,6 +164,7 @@ where
                 multicast: VecDeque::new(),
                 full: false,
                 overlap: None,
+                following: None,
                 slots: Vec::new(),
                 slots_checked: Time(1),
                 tx: TxStats::default(),
@@ -241,6 +246,8 @@ struct Driver<A, N> {
     full: bool,
     /// The no-overlap last logged.
     overlap: Option<(MacAddr, u8)>,
+    /// The peer followed and our sequence meanwhile, as last logged ([Node::following]).
+    following: Option<(MacAddr, [u8; 16])>,
     /// Each peer's slots on our channel, as last logged, and when they were last looked at.
     slots: Vec<(MacAddr, usize)>,
     slots_checked: Time,
@@ -305,10 +312,26 @@ impl<A: Air, N: Netif> Driver<A, N> {
                     self.publish_peers();
                 }
                 Action::Deliver(p) => self.netif.deliver(p),
+                Action::Tune(c) => self.air.tune(c),
             }
         }
         self.log_overlap();
+        self.log_following();
         self.log_slots();
+    }
+
+    /// Says when the node starts or stops following a peer's slots on another channel, or
+    /// follows them to other slots.
+    fn log_following(&mut self) {
+        let now = self.node.following().map(|(m, s)| (m, s.channels()));
+        if now == self.following {
+            return;
+        }
+        match now {
+            Some((m, seq)) => tracing::info!("following {m} to its other channel: our sequence {seq:?}"),
+            None => tracing::info!("back on our own channel in every slot ({} radio moves so far)", self.node.stats().tunes),
+        }
+        self.following = now;
     }
 
     /// Says when a peer changes how many slots it spends on our channel: an iPhone raises it

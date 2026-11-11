@@ -12,6 +12,10 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; The file version takes numbers only: for a prerelease (0.2.13-beta.1), its number part.
+#ifndef FileVersion
+  #define FileVersion AppVersion
+#endif
 #ifndef Stage
   #define Stage "..\..\target\stage"
 #endif
@@ -25,7 +29,7 @@ AppPublisher=WirDrop
 AppPublisherURL=https://github.com/JungyoKim/WirDrop
 AppSupportURL=https://github.com/JungyoKim/WirDrop/issues
 AppUpdatesURL=https://github.com/JungyoKim/WirDrop/releases
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#FileVersion}
 DefaultDirName={autopf}\WirDrop
 DisableDirPage=yes
 DisableProgramGroupPage=yes

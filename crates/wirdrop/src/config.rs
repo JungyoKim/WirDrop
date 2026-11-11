@@ -51,6 +51,9 @@ pub struct Tuning {
     /// Data Path State TLV의 확장 플래그 (owly_awdl::tlv::ext_flag). HE면 iPhone이 우리에게
     /// Wi-Fi 6(HE)으로 보냅니다: HE를 받는 무선(RTL8912AU)에서만 켭니다.
     pub awdl_ext_flags: u16,
+    /// 전송 중인 상대가 Wi-Fi 때문에 우리 80 MHz 안의 다른 채널(149면 153, 157, 161)에 머무는 슬롯에
+    /// 무선도 그 주 채널로 옮겨 따라갑니다 (owly_awdl::Config::follow). 80 MHz일 때만.
+    pub follow_channels: bool,
 }
 
 impl Tuning {
@@ -71,6 +74,7 @@ impl Tuning {
             rx_stbc: false,
             beamformee: false,
             awdl_ext_flags: 0,
+            follow_channels: true,
         }
     }
 }
@@ -127,6 +131,17 @@ pub fn awdl_config(mac: [u8; 6], name: &str, channel: u8, tuning: &Tuning) -> io
     Ok(c)
 }
 
+/// 5 GHz channel이 든 80 MHz 묶음의 다른 주 채널들 (149면 153, 157, 161). 묶음은 36과 149에서
+/// 16씩 시작하고, 묶음이 없는 채널(165 등)과 2.4 GHz는 빈 목록.
+pub fn same_80mhz(channel: u8) -> Vec<Channel> {
+    let start = match channel {
+        36..=64 | 100..=144 => 36 + (channel - 36) / 16 * 16,
+        149..=161 => 149,
+        _ => return Vec::new(),
+    };
+    (0..4).map(|i| start + 4 * i).filter(|&c| c != channel).map(Channel).collect()
+}
+
 fn invalid(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg)
 }
@@ -143,5 +158,15 @@ mod tests {
         assert_eq!(c.vht_caps.unwrap()[0], 0x31);
         assert_eq!(c.country, *b"KR");
         assert!(awdl_config([3, 0, 0, 0, 0, 1], "PC", 149, &Tuning::default()).is_err());
+    }
+
+    #[test]
+    fn the_80mhz_blocks() {
+        let chans = |c| same_80mhz(c).iter().map(|c| c.0).collect::<Vec<_>>();
+        assert_eq!(chans(149), [153, 157, 161]);
+        assert_eq!(chans(157), [149, 153, 161]);
+        assert_eq!(chans(44), [36, 40, 48]);
+        assert_eq!(chans(112), [100, 104, 108]);
+        assert!(chans(165).is_empty() && chans(6).is_empty());
     }
 }

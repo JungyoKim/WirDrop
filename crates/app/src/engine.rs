@@ -22,6 +22,10 @@ type Pipe = Conn<NamedPipeClient>;
 
 /// 보내기가 받는 기기가 나타나길 기다리는 시간.
 const FIND_FOR: Duration = Duration::from_secs(45);
+/// owly-airdrop이 받는 기기가 답 없이 연결을 닫았을 때 내는 실패 ([Outcome::Failed]), 그리고 그것을
+/// 다시 물어볼 만큼 빨리 닫힌 때: 사람이 판단하기 전.
+const CLOSED_BEFORE_ANSWER: &str = "connection closed before a response";
+const CLOSED_EARLY: Duration = Duration::from_secs(2);
 /// 마지막 요청 뒤 BLE 깨우기가 이어지는 시간. 받는 기기 찾기는 링크가 올라와 있는 동안 계속하므로,
 /// 찾은 기기는 떠날 때까지 목록에 남습니다.
 const BROWSE_FOR: Duration = Duration::from_secs(90);
@@ -223,6 +227,10 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
         link_cfg.tuning.amsdu_max_frame = None;
     }
     tracing::info!("AWDL extension flags 0x{:04x}", link_cfg.tuning.awdl_ext_flags);
+    tracing::info!(
+        "following a peer's other channel: {}",
+        if link_cfg.tuning.follow_channels { "on" } else { "off" }
+    );
     let ports: Vec<u16> = (0..members.len() as u16).map(|i| airdrop::PORT + i).collect();
     // netsh는 1초 가까이 걸리니, 더 오래 걸리는 어댑터와 나란히 합니다.
     let rules = if firewall.as_ref().is_some_and(|(p, _)| *p == ports) {
@@ -654,9 +662,12 @@ fn start_send(
                     // 받는 기기가 수락한 때와 올리는 크기.
                     let mut accepted: Option<Instant> = None;
                     let mut total = 0;
+                    // 묻기에 이르렀는지: 못 이르렀으면 보낼 파일을 읽다가 실패한 것입니다.
+                    let mut reached = false;
                     while let Some(event) = progress.recv().await {
                         let state = match event {
                             SendEvent::Asking => {
+                                reached = true;
                                 // 여기까지가 우리 쪽 준비: 나머지는 연결과 받는 기기의 판단.
                                 tracing::info!("send {job}: asking after {:.2} s", asked.elapsed().as_secs_f64());
                                 SendState::Asking
@@ -680,17 +691,27 @@ fn start_send(
                         };
                         let _ = updates.send((job, state));
                     }
-                    (accepted, total)
+                    (reached, accepted, total)
                 })
             };
             let _ = updates.send((job, SendState::Packing));
+            let tried = Instant::now();
             let result = sender.send(&target, &payload, Some(progress_tx)).await;
-            let (accepted, total) = forward.await.unwrap_or_default();
+            let (reached, accepted, total) = forward.await.unwrap_or_default();
             // 받는 기기가 답하기도 전에 연결이 없습니다: 찾은 뒤에 잠들었고, 이 보내기가 시작한
             // 깨우기로 돌아오는데 흔히 새 인스턴스로 옵니다. FIND_FOR가 지날 때까지 마지막에 찾은
             // 것으로 해 봅니다.
-            match &result {
-                Err(e) if accepted.is_none() && asked.elapsed() + Duration::from_secs(attempt.min(3)) < FIND_FOR => {
+            // 막 깨어난 iPhone은 묻자마자(50 ms 안) 답 없이 연결을 닫기도 합니다: 사람이 볼 틈도 없었으니
+            // 거절이 아니고 (거절은 403), 다시 물으면 받습니다. 몇 초 뒤에 닫힌 것은 iPhone 쪽 시간 초과라
+            // 그대로 실패입니다.
+            let why = match &result {
+                // 묻기 전의 실패는 보낼 것 자체의 문제(받는 기기가 못 받는 이름, 크기)라 다시 해도 같습니다.
+                Err(e) if reached => Some(e.to_string()),
+                Ok(Outcome::Failed(r)) if r == CLOSED_BEFORE_ANSWER && tried.elapsed() < CLOSED_EARLY => Some(r.clone()),
+                _ => None,
+            };
+            match why {
+                Some(e) if accepted.is_none() && asked.elapsed() + Duration::from_secs(attempt.min(3)) < FIND_FOR => {
                     tracing::info!(
                         "send {job} to {} ({}): {e}; trying again as it wakes (attempt {attempt})",
                         target.name,

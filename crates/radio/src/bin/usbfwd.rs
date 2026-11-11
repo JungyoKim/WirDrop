@@ -242,6 +242,13 @@ struct Stats {
     tx_amsdu: AtomicU64,
     tx_amsdu_msdus: AtomicU64,
     rx_to_us_bytes: AtomicU64,
+    /// 호스트가 청한 주 채널 이동 ([Radio::set_primary]): 횟수, 걸린 시간(합과 최대, µs), 실패.
+    moves: AtomicU64,
+    move_us: AtomicU64,
+    move_max_us: AtomicU64,
+    move_fail: AtomicU64,
+    /// 처음 채널이 아닌 주 채널에 있을 때 우리에게 온 데이터 프레임.
+    rx_to_us_moved: AtomicU64,
 }
 
 /// 상대가 우리에게 보낸 Block Ack이 알려 주는 그 수신 창.
@@ -390,6 +397,9 @@ struct Relay {
     restart: AtomicBool,
     /// 순수 TCP ACK를 보내기 전에 기다리는 조용한 시간(µs, 0이면 곧바로 보냄).
     ack_quiet_us: i64,
+    /// 처음 채널과 지금 주 채널 ([Radio::set_primary]로 같은 80 MHz 안에서 옮김).
+    home: u8,
+    primary: AtomicU8,
     /// AWDL 상대마다 부드럽게 한 RSSI(0-100)와 마지막으로 들린 때: 가장 약한 것이 수신 이득의
     /// 한계를 정합니다.
     peers: Mutex<HashMap<[u8; 6], (f32, Instant)>>,
@@ -998,6 +1008,9 @@ impl Relay {
         if to_us && ty == 2 {
             s.rx_to_us.fetch_add(1, Relaxed);
             s.rx_to_us_bytes.fetch_add(len as u64, Relaxed);
+            if self.primary.load(Relaxed) != self.home {
+                s.rx_to_us_moved.fetch_add(1, Relaxed);
+            }
             if len > 200 {
                 self.last_data_ns.store(now_ns(), Relaxed);
             }
@@ -1137,6 +1150,16 @@ impl Relay {
             g(&s.tx_vht),
             self.last_rssi.load(Relaxed)
         );
+        let moves = g(&s.moves);
+        if let Some(avg) = g(&s.move_us).checked_div(moves) {
+            log!(
+                "primary channel moves {moves} (avg {avg} us, max {} us, failed {}) | data to us off channel {} {}",
+                g(&s.move_max_us),
+                g(&s.move_fail),
+                self.home,
+                g(&s.rx_to_us_moved)
+            );
+        }
         if self.reorder_ms > 0 {
             log!(
                 "reorder held {} dup {} old {} skip {} bar {}",
@@ -1717,6 +1740,8 @@ fn run() -> io::Result<()> {
         answers_paused: Mutex::new(None),
         restart: AtomicBool::new(false),
         ack_quiet_us,
+        home: channel,
+        primary: AtomicU8::new(channel),
         up: Mutex::new(Vec::with_capacity(UP_MAX)),
         up_batch: env_num::<u32>("USBFWD_UP_BATCH").unwrap_or(1) != 0,
         eof_event: wait::Event::new(),
@@ -1810,6 +1835,7 @@ fn run() -> io::Result<()> {
         let peers = radio.peers();
         radio.close();
         radio = Radio::open(cfg.clone())?;
+        relay.primary.store(relay.home, Relaxed);
         radio.restore_peers(peers);
         voice_access(&radio);
         *relay.answers.lock().unwrap() = AnswerWindow::new();
@@ -1906,6 +1932,31 @@ fn watchdog(radio: &Radio, relay: &Relay) {
                 }
             }
             Err(e) => log!("watchdog: {e}"),
+        }
+    }
+}
+
+/// 호스트가 청한 같은 80 MHz 안의 주 채널로 옮기고 ([Radio::set_primary]) 걸린 시간을 셉니다.
+fn move_primary(radio: &Radio, relay: &Relay, ch: u8) {
+    if relay.primary.load(Relaxed) == ch {
+        return;
+    }
+    let s = &relay.stats;
+    let t = Instant::now();
+    match radio.set_primary(ch) {
+        Ok(()) => {
+            let us = t.elapsed().as_micros() as u64;
+            relay.primary.store(ch, Relaxed);
+            s.move_us.fetch_add(us, Relaxed);
+            s.move_max_us.fetch_max(us, Relaxed);
+            if s.moves.fetch_add(1, Relaxed) < 3 {
+                log!("moved to primary channel {ch} in {us} us");
+            }
+        }
+        Err(e) => {
+            if s.move_fail.fetch_add(1, Relaxed) < 3 {
+                log!("primary channel {ch}: {e}");
+            }
         }
     }
 }
@@ -2151,6 +2202,15 @@ fn tx_loop(
         match got {
             Ok((n, from)) => {
                 *relay.peer.lock().unwrap() = Some(from);
+                if n == 4 && buf[0] == 3 {
+                    // 호스트가 같은 80 MHz 안의 다른 주 채널로 옮기라고: 그 전에 받은 프레임을 먼저 보냅니다.
+                    if let Some((d, r, na)) = merge.take().map(merged) {
+                        air(&mut pool, &d, r, na, vht, false);
+                    }
+                    flush(&mut pool);
+                    move_primary(radio, relay, buf[1]);
+                    continue;
+                }
                 let mut off = 0;
                 while let Some((rate, noack, f, next)) = host_record(&buf[..n], off) {
                     off = next;

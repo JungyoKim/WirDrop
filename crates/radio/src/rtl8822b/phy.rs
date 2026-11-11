@@ -405,6 +405,44 @@ impl Rtl8822b {
         self.set_channel_rfe(ch, rx, tx)
     }
 
+    /// 같은 중심과 폭에서 주 20 MHz 채널만 바꿉니다: BB가 받는 주 채널(REG_ADCCLK)과 MAC이 보내는
+    /// 부대역(REG_DATA_SC). RF와 이득은 그대로라 USB 전송 몇 번이면 됩니다 (AWDL 상대의 슬롯을 따라
+    /// 80 MHz 안에서 옮길 때).
+    pub fn set_primary(&self, c: Channel) -> io::Result<()> {
+        self.set_bb_primary(c)?;
+        self.set_mac_primary(c)
+    }
+
+    /// rtw8822b_set_channel_bb의 폭과 주 채널 부분.
+    fn set_bb_primary(&self, c: Channel) -> io::Result<()> {
+        let r = &self.regs;
+        let mut v = r.r32(REG_ADCCLK)?;
+        match c.bw {
+            Bw::B20 => v &= 0xffcf_fc00,
+            Bw::B40 => {
+                if c.sc == 1 {
+                    r.set32(REG_RXSB, 1 << 4)?;
+                } else {
+                    r.clr32(REG_RXSB, 1 << 4)?;
+                }
+                v = (v & 0xff3f_f300) | (((c.sc as u32 & 0xf) << 2) | 1);
+            }
+            Bw::B80 => v = (v & 0xfcef_cf00) | (((c.sc as u32 & 0xf) << 2) | 2),
+        }
+        r.w32(REG_ADCCLK, v)
+    }
+
+    /// rtw_set_channel_mac의 송신 부대역.
+    fn set_mac_primary(&self, c: Channel) -> io::Result<()> {
+        let txsc20 = c.sc as u32;
+        let txsc40 = if c.bw == Bw::B80 {
+            if txsc20 == 1 || txsc20 == 3 { 9 } else { 10 }
+        } else {
+            0
+        };
+        self.regs.w8(REG_DATA_SC, ((txsc20 & 0xf) | ((txsc40 & 0xf) << 4)) as u8)
+    }
+
     /// rtw8822b_set_channel과 rtw_set_channel_mac.
     pub fn set_channel(&self, c: Channel) -> io::Result<()> {
         let r = &self.regs;
@@ -451,33 +489,14 @@ impl Rtl8822b {
             r.w32m(REG_CLKTRK, 0x1ffe_0000, clk)?;
             r.w32m(0xcbc, 0x300, 0x1)?;
         }
-        let mut v = r.r32(REG_ADCCLK)?;
-        match c.bw {
-            Bw::B20 => v &= 0xffcf_fc00,
-            Bw::B40 => {
-                if c.sc == 1 {
-                    r.set32(REG_RXSB, 1 << 4)?;
-                } else {
-                    r.clr32(REG_RXSB, 1 << 4)?;
-                }
-                v = (v & 0xff3f_f300) | (((c.sc as u32 & 0xf) << 2) | 1);
-            }
-            Bw::B80 => v = (v & 0xfcef_cf00) | (((c.sc as u32 & 0xf) << 2) | 2),
-        }
-        r.w32(REG_ADCCLK, v)?;
+        self.set_bb_primary(c)?;
         r.w32m(REG_ADC160, 1 << 30, 0x1)?;
         if c.bw == Bw::B80 && (self.efuse.rfe_option == 2 || self.efuse.rfe_option == 3) {
             r.w32m(REG_L1PKWT, 0x0000_f000, 0x6)?;
             r.w32m(REG_ADC40, 1 << 10, 0x1)?;
         }
         // --- MAC (rtw_set_channel_mac)
-        let txsc20 = c.sc as u32;
-        let txsc40 = if c.bw == Bw::B80 {
-            if txsc20 == 1 || txsc20 == 3 { 9 } else { 10 }
-        } else {
-            0
-        };
-        r.w8(REG_DATA_SC, ((txsc20 & 0xf) | ((txsc40 & 0xf) << 4)) as u8)?;
+        self.set_mac_primary(c)?;
         let mut v = r.r32(REG_WMAC_TRXPTCL_CTL)? & !BIT_RFMOD;
         v |= match c.bw {
             Bw::B80 => BIT_RFMOD_80M,

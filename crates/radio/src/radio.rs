@@ -321,13 +321,7 @@ impl Radio {
 
     fn open_rtw89(cfg: Config) -> io::Result<Radio> {
         let t = Instant::now();
-        let bw = match cfg.bw_mhz {
-            160 => rtl8922a::Bw::B160,
-            80 => rtl8922a::Bw::B80,
-            40 => rtl8922a::Bw::B40,
-            _ => rtl8922a::Bw::B20,
-        };
-        let chan = rtl8922a::Chan::around(cfg.channel, bw);
+        let chan = rtl8922a::Chan::around(cfg.channel, rtw89_bw(cfg.bw_mhz));
         let (chip, rfk) = Rtl8922a::start_with(cfg.usb, &chan, cfg.country)?;
         let ok = rfk.iter().filter(|r| r.ok()).count();
         tracing::debug!(
@@ -445,6 +439,34 @@ impl Radio {
 
     pub fn bw(&self) -> Bw {
         Channel::new(self.cfg.channel, self.cfg.bw_mhz).bw
+    }
+
+    /// 처음 채널과 같은 묶음(중심과 폭) 안의 주 채널 primary로 옮깁니다: 레지스터 몇 개만 바뀝니다
+    /// (AWDL 상대의 슬롯을 따라갈 때). 묶음 밖의 채널은 거절합니다.
+    pub fn set_primary(&self, primary: u8) -> io::Result<()> {
+        let outside = || {
+            err(format!(
+                "channel {primary} is outside channel {}'s {} MHz",
+                self.cfg.channel, self.cfg.bw_mhz
+            ))
+        };
+        match &self.chip {
+            Chip::Rtw88(c) => {
+                let (home, to) = (Channel::new(self.cfg.channel, self.cfg.bw_mhz), Channel::new(primary, self.cfg.bw_mhz));
+                if to.center != home.center || to.bw != home.bw {
+                    return Err(outside());
+                }
+                c.set_primary(to)
+            }
+            Chip::Rtw89(c) => {
+                let bw = rtw89_bw(self.cfg.bw_mhz);
+                let (home, to) = (rtl8922a::Chan::around(self.cfg.channel, bw), rtl8922a::Chan::around(primary, bw));
+                if to.center != home.center || to.bw != home.bw || to.band != home.band {
+                    return Err(outside());
+                }
+                c.set_primary(&to)
+            }
+        }
     }
 
     fn fill_desc(&self, d: &mut [u8], f: &TxFrame) {
@@ -732,6 +754,16 @@ impl Radio {
             }
             Chip::Rtw89(c) => c.power_off(),
         }
+    }
+}
+
+/// MHz를 RTL8922A의 채널 폭으로.
+fn rtw89_bw(mhz: u16) -> rtl8922a::Bw {
+    match mhz {
+        160 => rtl8922a::Bw::B160,
+        80 => rtl8922a::Bw::B80,
+        40 => rtl8922a::Bw::B40,
+        _ => rtl8922a::Bw::B20,
     }
 }
 
