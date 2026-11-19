@@ -52,10 +52,56 @@ impl Drop for Anisette {
     }
 }
 
+/// Anisette를 시작하지 못한 까닭.
+#[derive(Debug)]
+pub enum Failed {
+    /// 이 PC가 Apple에 기기로 등록되어 있지 않은데, 등록하지 말라고 했습니다.
+    Unregistered,
+    Other(String),
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failed::Unregistered => f.write_str("this PC isn't registered with Apple"),
+            Failed::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(message: String) -> Failed {
+        Failed::Other(message)
+    }
+}
+
+impl From<&str> for Failed {
+    fn from(message: &str) -> Failed {
+        Failed::Other(message.into())
+    }
+}
+
+impl From<Failed> for String {
+    fn from(f: Failed) -> String {
+        f.to_string()
+    }
+}
+
+/// 도우미가 일회용 암호를 주지 못한 까닭: 이 PC가 Apple에 등록되지 않았는지, 아니면 다른 것.
+enum NoOtp {
+    Unregistered(String),
+    Other(String),
+}
+
 impl Anisette {
     /// out의 로그인을 위해 도우미를 시작합니다. 이 PC에 iCloud for Windows가 없으면 먼저 받아서
     /// 풉니다.
-    pub async fn start(out: &Path) -> Result<Anisette, String> {
+    ///
+    /// 도우미가 이 PC는 Apple에 등록되지 않았다고 답할 때, register면 PC를 등록합니다. 등록을 시작하면
+    /// 전에 있던 등록이 지워지고, 그것에 묶인 이 PC의 로그인도 Apple이 더는 받지 않습니다. 그래서
+    /// 사람이 하는 로그인만 register로 부르고, 저장된 로그인을 이어 가는 갱신은 [Failed::Unregistered]를
+    /// 받습니다. 그 밖의 실패(도우미가 답하지 않음 등)로는 절대 등록하지 않습니다.
+    pub async fn start(out: &Path, register: bool) -> Result<Anisette, Failed> {
         say!("starting Apple's anisette");
         let home = icloud_home();
         if !unpacked(&home) {
@@ -97,7 +143,7 @@ impl Anisette {
                 }
             }
         });
-        let (device, pc_user) = device()?;
+        let (device, pc_user) = device(out)?;
         let local_user = sign_in_user(out)?.unwrap_or(pc_user);
         let mut anisette = Anisette {
             helper,
@@ -109,12 +155,20 @@ impl Anisette {
         };
         // 이 PC가 Apple에 기기로 등록된 적이 없으면 (iCloud나 iTunes를 켠 적 없는 PC) CoreADI는
         // 일회용 암호를 만들지 못합니다. 그때 한 번 등록하고 다시 묻습니다.
-        if let Err(first) = anisette.otp() {
-            crate::log_line(&format!("no one-time password yet ({first}); registering this PC"));
-            say!("registering this PC with Apple… (once)");
-            anisette.provision().await?;
-            anisette.otp()?;
-            say!("this PC is registered with Apple");
+        match anisette.try_otp() {
+            Ok(_) => {}
+            Err(NoOtp::Other(e)) => return Err(Failed::Other(e)),
+            Err(NoOtp::Unregistered(_)) if !register => return Err(Failed::Unregistered),
+            Err(NoOtp::Unregistered(first)) => {
+                crate::log_line(&format!("no one-time password yet ({first}); registering this PC"));
+                if other_sign_ins(out) {
+                    say!("this PC's registration with Apple is gone: the other Apple IDs on it will need to sign in again");
+                }
+                say!("registering this PC with Apple… (once)");
+                anisette.provision().await?;
+                anisette.otp()?;
+                say!("this PC is registered with Apple");
+            }
         }
         Ok(anisette)
     }
@@ -134,10 +188,22 @@ impl Anisette {
 
     /// AOSKit의 새 일회용 암호와 기기 ID.
     fn otp(&mut self) -> Result<(String, String), String> {
-        let answer = self.ask("otp")?;
+        self.try_otp().map_err(|(NoOtp::Unregistered(e) | NoOtp::Other(e))| e)
+    }
+
+    /// [Anisette::otp], 실패하면 그것이 이 PC가 등록되지 않았기 때문인지와 함께.
+    fn try_otp(&mut self) -> Result<(String, String), NoOtp> {
+        let answer = self.ask("otp").map_err(NoOtp::Other)?;
         match (answer["md"].as_str(), answer["mdm"].as_str()) {
             (Some(md), Some(mdm)) => Ok((md.to_string(), mdm.to_string())),
-            _ => Err(format!("anisette: {}", answer["error"].as_str().unwrap_or("no answer"))),
+            _ => {
+                let why = format!("anisette: {}", answer["error"].as_str().unwrap_or("no answer"));
+                if answer["unregistered"].as_bool() == Some(true) {
+                    Err(NoOtp::Unregistered(why))
+                } else {
+                    Err(NoOtp::Other(why))
+                }
+            }
         }
     }
 
@@ -406,22 +472,86 @@ fn hex(bytes: &[u8]) -> String {
 
 /// PC의 기기 ID와 자기 로컬 사용자. 한 번 만들어 %LOCALAPPDATA%\WirDrop\device.txt에 두므로 PC는
 /// Apple이 아는 같은 기기로 남습니다.
-fn device() -> Result<(String, String), String> {
-    let ours = local_app_data().join(r"WirDrop\device.txt");
-    if let Ok(text) = std::fs::read_to_string(&ours) {
-        let mut fields = text.split_whitespace();
-        if let (Some(device), Some(user)) = (fields.next(), fields.next()) {
-            return Ok((device.to_string(), user.to_string()));
+///
+/// Apple은 로그인을 그때의 기기에 묶으므로, 로그인 폴더 out에도 그 값을 같이 둡니다
+/// ([SIGN_IN_DEVICE]). 한 곳이 사라져도 다른 곳에서 되찾습니다: out의 것, PC의 것, 이 PC의 다른
+/// 로그인이 둔 것 순서로. 어디에도 없을 때만 새로 만드는데, 그러면 out에 저장된 로그인은 Apple이 더는
+/// 받지 않을 수 있으므로 그렇다고 남깁니다.
+fn device(out: &Path) -> Result<(String, String), String> {
+    device_at(&local_app_data().join(r"WirDrop\device.txt"), out)
+}
+
+/// [device], PC의 것을 pc에 두고.
+fn device_at(pc: &Path, out: &Path) -> Result<(String, String), String> {
+    let mine = out.join(SIGN_IN_DEVICE);
+    let (saved, on_pc) = (read_device(&mine), read_device(pc));
+    let found = match (&saved, &on_pc) {
+        (Some(d), Some(_)) => d.clone(),
+        (Some(d), None) => {
+            say!("this PC's device ID file was gone: put back from this sign-in's copy");
+            d.clone()
         }
+        (None, Some(d)) => d.clone(),
+        (None, None) => match sibling_sign_ins(out).find_map(|root| read_device(&root.join(SIGN_IN_DEVICE))) {
+            Some(d) => {
+                say!("this PC's device ID file was gone: put back from another sign-in's copy");
+                d
+            }
+            None => {
+                if out.join(crate::SESSION).is_file() {
+                    say!("the device ID this sign-in was made with is gone, so a new one: Apple may want a new sign-in");
+                }
+                new_device()
+            }
+        },
+    };
+    if on_pc.is_none() {
+        write_device(pc, &found)?;
     }
-    let id = hex(&rand::random::<[u8; 16]>());
-    let device = format!("{}-{}-{}-{}-{}", &id[..8], &id[8..12], &id[12..16], &id[16..20], &id[20..]);
-    let user = hex(&rand::random::<[u8; 32]>());
-    if let Some(dir) = ours.parent() {
+    if saved.as_ref() != Some(&found) {
+        write_device(&mine, &found)?;
+    }
+    Ok(found)
+}
+
+/// 로그인 폴더 안에, 그 로그인을 한 PC의 기기 ID와 로컬 사용자 ([device] 참고).
+const SIGN_IN_DEVICE: &str = r"anisette\device.txt";
+
+/// "기기ID 사용자" 한 줄. 읽을 수 없거나 꼴이 틀리면 None.
+fn read_device(path: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut fields = text.split_whitespace();
+    let (device, user) = (fields.next()?, fields.next()?);
+    let hexish = |s: &str, dashes: bool| s.bytes().all(|b| b.is_ascii_hexdigit() || (dashes && b == b'-'));
+    (device.len() == 36 && hexish(device, true) && user.len() >= 32 && hexish(user, false)).then(|| (device.to_string(), user.to_string()))
+}
+
+fn write_device(path: &Path, (device, user): &(String, String)) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&ours, format!("{device} {user}\n")).map_err(|e| e.to_string())?;
-    Ok((device, user))
+    std::fs::write(path, format!("{device} {user}\n")).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn new_device() -> (String, String) {
+    let id = hex(&rand::random::<[u8; 16]>());
+    let device = format!("{}-{}-{}-{}-{}", &id[..8], &id[8..12], &id[12..16], &id[16..20], &id[20..]);
+    (device, hex(&rand::random::<[u8; 32]>()))
+}
+
+/// out 옆의 다른 로그인 폴더들 (WirDrop은 Apple ID마다 apple-ids\<n>에 둡니다).
+fn sibling_sign_ins(out: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    out.parent()
+        .and_then(|parent| std::fs::read_dir(parent).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(move |root| root.is_dir() && root.as_path() != out)
+}
+
+/// 이 PC에 out 말고도 저장된 로그인이 있는지.
+fn other_sign_ins(out: &Path) -> bool {
+    sibling_sign_ins(out).any(|root| root.join(crate::SESSION).is_file())
 }
 
 /// 이 로그인 자체의 로컬 사용자 (있으면): Mac에서처럼 이 PC의 다른 사람 Apple ID는 이 PC의 다른
@@ -494,10 +624,86 @@ pub fn utc_now() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn writes_times_as_apple_does() {
         let now = super::utc_now();
         assert_eq!(now.len(), 20);
         assert!(now.ends_with('Z') && now.as_bytes()[10] == b'T');
+    }
+
+    /// 시험마다 빈 폴더: PC의 device.txt 자리와 apple-ids\1, apple-ids\2.
+    fn scratch(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("appleid-device-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (one, two) = (base.join(r"apple-ids\1"), base.join(r"apple-ids\2"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        (base.join("device.txt"), one, two)
+    }
+
+    fn signed_in(root: &Path) {
+        std::fs::write(root.join(crate::SESSION), b"session").unwrap();
+    }
+
+    #[test]
+    fn a_sign_in_keeps_the_device_it_was_made_with() {
+        let (pc, one, _) = scratch("keeps");
+        let first = device_at(&pc, &one).unwrap();
+        assert_eq!(read_device(&pc), Some(first.clone()));
+        assert_eq!(read_device(&one.join(SIGN_IN_DEVICE)), Some(first.clone()));
+        // PC의 파일이 사라져도 (2026-11-19처럼) 로그인은 자기 것을 갖고 있습니다.
+        std::fs::remove_file(&pc).unwrap();
+        signed_in(&one);
+        assert_eq!(device_at(&pc, &one).unwrap(), first);
+        assert_eq!(read_device(&pc), Some(first));
+    }
+
+    #[test]
+    fn a_new_sign_in_gets_the_pc_device_back_from_another() {
+        let (pc, one, two) = scratch("sibling");
+        let first = device_at(&pc, &one).unwrap();
+        std::fs::remove_file(&pc).unwrap();
+        assert_eq!(device_at(&pc, &two).unwrap(), first);
+        assert_eq!(read_device(&pc), Some(first.clone()));
+        assert_eq!(read_device(&two.join(SIGN_IN_DEVICE)), Some(first));
+    }
+
+    #[test]
+    fn an_older_sign_in_takes_the_pc_device() {
+        let (pc, one, _) = scratch("older");
+        let ours = new_device();
+        write_device(&pc, &ours).unwrap();
+        signed_in(&one);
+        assert_eq!(device_at(&pc, &one).unwrap(), ours);
+        assert_eq!(read_device(&one.join(SIGN_IN_DEVICE)), Some(ours));
+    }
+
+    #[test]
+    fn a_sign_in_keeps_its_own_device_over_a_changed_pc_one() {
+        let (pc, one, _) = scratch("changed");
+        let first = device_at(&pc, &one).unwrap();
+        write_device(&pc, &new_device()).unwrap();
+        assert_eq!(device_at(&pc, &one).unwrap(), first);
+    }
+
+    #[test]
+    fn reads_only_well_formed_devices() {
+        let (pc, _, _) = scratch("form");
+        std::fs::write(&pc, "nonsense").unwrap();
+        assert_eq!(read_device(&pc), None);
+        let d = new_device();
+        write_device(&pc, &d).unwrap();
+        assert_eq!(read_device(&pc), Some(d));
+    }
+
+    #[test]
+    fn tells_other_sign_ins_apart() {
+        let (_, one, two) = scratch("others");
+        assert!(!other_sign_ins(&one));
+        signed_in(&one);
+        assert!(!other_sign_ins(&one));
+        assert!(other_sign_ins(&two));
     }
 }

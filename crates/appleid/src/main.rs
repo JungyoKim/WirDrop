@@ -44,9 +44,14 @@ const SESSION: &str = "session.plist";
 const APP_TOKEN: &str = "gs-token.txt";
 /// WirDrop도 status.json도 말하지 않을 때 iPhone에 보일 PC의 모델.
 const DEFAULT_MODEL: &str = "MacPro7,1";
-/// 확인 기록(30일 유효)과 인증서(1년)를 만료보다 얼마나 앞서 갱신하는지.
-const RECORD_AHEAD: u64 = 10 * 86_400;
+/// 확인 기록(30일 유효)과 인증서(1년)를 만료보다 얼마나 앞서 갱신하는지. 확인 기록은 일주일이 되면
+/// 새로 받습니다: 그러면 저장된 로그인을 일주일마다 실제로 써 보므로, Apple이 더는 받지 않는
+/// 로그인(PC의 기기 ID나 등록이 바뀐 때 등)을 기록이 끝나기 3주 전에 알게 됩니다.
+const RECORD_AHEAD: u64 = 23 * 86_400;
 const CERTIFICATE_AHEAD: u64 = 30 * 86_400;
+/// 확인 기록을 받은 뒤 다시 묻기까지 적어도 이만큼: Apple이 같은 기록을 돌려주더라도 6시간마다
+/// 묻지 않게.
+const RECORD_RECHECK: u64 = 86_400;
 
 /// 진행 한 줄: 로그에, 그리고 WirDrop에는 status 이벤트로, 콘솔에는 그대로.
 pub fn status(message: &str) {
@@ -157,7 +162,7 @@ async fn sign_in(out: &Path, request: Value) -> Result<SignedIn, String> {
     if account.is_empty() || password.is_empty() {
         return Err("no Apple ID or password".into());
     }
-    let mut anisette = Anisette::start(out).await?;
+    let mut anisette = Anisette::start(out, true).await?;
     say!("signing in");
     let session = gsa::sign_in(&account, &password, &mut anisette, &mut ask_code).await?;
     drop(password);
@@ -225,12 +230,15 @@ async fn refresh(out: &Path) -> i32 {
     let record_ends = status["record_valid_as_of"].as_u64().unwrap_or(0) + status["record_valid_seconds"].as_u64().unwrap_or(0);
     let certificate_ends = status["cert_not_after"].as_u64().unwrap_or(0);
     let certificate_due = certificate_ends < now + CERTIFICATE_AHEAD;
-    let due = std::env::var_os("APPLEID_FORCE").is_some() || certificate_due || record_ends < now + RECORD_AHEAD;
+    // status.json을 마지막으로 쓴 때: 인증서나 확인 기록을 받은 때.
+    let written = status["issued_at"].as_u64().unwrap_or(0);
+    let record_due = record_ends < now + RECORD_AHEAD && written + RECORD_RECHECK <= now;
+    let due = std::env::var_os("APPLEID_FORCE").is_some() || certificate_due || record_due;
     if !due {
         say!(
             "nothing due: the record is good for {} more days, the certificate {}",
-            (record_ends - now) / 86_400,
-            (certificate_ends - now) / 86_400
+            record_ends.saturating_sub(now) / 86_400,
+            certificate_ends.saturating_sub(now) / 86_400
         );
         return 0;
     }
@@ -244,8 +252,13 @@ async fn refresh(out: &Path) -> i32 {
         say!("no saved app token or session: sign in again");
         return 2;
     }
-    let mut anisette = match Anisette::start(out).await {
+    // 갱신은 PC를 등록하지 않습니다: 등록은 이 PC의 모든 로그인을 끊습니다 (Anisette::start).
+    let mut anisette = match Anisette::start(out, false).await {
         Ok(a) => a,
+        Err(anisette::Failed::Unregistered) => {
+            say!("this PC isn't registered with Apple any more: sign in again, which registers it");
+            return 2;
+        }
         Err(e) => {
             say!("anisette: {e}");
             return 1;

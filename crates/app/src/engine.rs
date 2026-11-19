@@ -268,6 +268,9 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
     );
 
     let mut peers = link.peers();
+    // awdl0의 IPv6가 리셋되었다 돌아올 때마다 (VPN 등) 받는 쪽과 받는 기기 찾기를 새로 엽니다.
+    let mut resets = link.ipv6_resets();
+    let mut resets_live = true;
     let mut inbox = Inbox::default();
     // 처음부터 듣습니다: AirDrop이 켜진 폰(최근에 깨웠거나 보내는 중)은 탐색기 메뉴를 여는 순간
     // 목록에 있습니다.
@@ -316,15 +319,7 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
                                 m.profile.media = Media { hevc: cfg.hevc, heif: cfg.heif };
                                 m.profile.model = model(cfg);
                             }
-                            // 옛 받는 쪽들이 먼저 포트를 놓아야 합니다.
-                            drop(receiving.take());
-                            receiving = start_receiving(&link, &members, &household, cfg).await?;
-                            if let Some(d) = &discovery {
-                                let waking = d.waking();
-                                // 옛 것이 먼저 BLE 광고를 놓아야 합니다.
-                                drop(discovery.take());
-                                discovery = Some(start_discovery(&link, &members, waking).await?);
-                            }
+                            reopen(&mut receiving, &mut discovery, &link, &members, &household, cfg).await?;
                         }
                     }
                     Msg::Answer { id, accept } => match inbox.asked.remove(&id) {
@@ -396,6 +391,14 @@ async fn session(pipe: &mut Pipe, cfg: &mut EngineConfig, firewall: &mut Option<
                     running.remove(&job);
                 }
                 pipe.send(&Msg::SendUpdate { job, state }).await?;
+            }
+            changed = resets.changed(), if resets_live => {
+                if changed.is_err() {
+                    resets_live = false;
+                } else if let Err(e) = reopen(&mut receiving, &mut discovery, &link, &members, &household, cfg).await {
+                    tracing::warn!("listening on awdl0 again after its IPv6 reset failed ({e}): restarting the link");
+                    return Ok(End::Restart);
+                }
             }
             changed = peers.changed() => {
                 if changed.is_ok() {
@@ -501,6 +504,25 @@ async fn start_receiving(link: &Link, members: &[Member], household: &[Account],
         });
     }
     Ok(Some(Receivers { running, events }))
+}
+
+/// 받는 쪽과 (돌고 있으면) 받는 기기 찾기를 새로 엽니다: 바뀐 이름이나 설정으로, 또는 awdl0의 IPv6가
+/// 리셋된 뒤 새 소켓으로. 옛 것들이 먼저 포트와 BLE 광고를 놓습니다.
+async fn reopen(
+    receiving: &mut Option<Receivers>,
+    discovery: &mut Option<Discovery>,
+    link: &Link,
+    members: &[Member],
+    household: &[Account],
+    cfg: &EngineConfig,
+) -> io::Result<()> {
+    drop(receiving.take());
+    *receiving = start_receiving(link, members, household, cfg).await?;
+    if let Some(waking) = discovery.as_ref().map(Discovery::waking) {
+        drop(discovery.take());
+        *discovery = Some(start_discovery(link, members, waking).await?);
+    }
+    Ok(())
 }
 
 async fn start_discovery(link: &Link, members: &[Member], wake: bool) -> io::Result<Discovery> {

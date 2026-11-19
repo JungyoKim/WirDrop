@@ -65,6 +65,7 @@ pub struct Link {
     usbfwd: Option<Usbfwd>,
     peers: watch::Receiver<Vec<PeerInfo>>,
     failed: watch::Receiver<Option<String>>,
+    resets: watch::Receiver<u64>,
     interface: Interface,
     _timer: TimerPeriod,
 }
@@ -99,6 +100,7 @@ impl Link {
             index: netif.index(),
             addr: netif.addr(),
         };
+        let resets = netif.resets();
         let air = UdpAir::open(
             SocketAddr::from(([127, 0, 0, 1], usb.host_port)),
             SocketAddr::from(([127, 0, 0, 1], usb.radio_port)),
@@ -133,6 +135,7 @@ impl Link {
             usbfwd: Some(usbfwd),
             peers,
             failed,
+            resets,
             interface,
             _timer: timer,
         })
@@ -140,6 +143,12 @@ impl Link {
 
     pub fn interface(&self) -> Interface {
         self.interface
+    }
+
+    /// awdl0의 IPv6가 리셋되었다가 돌아올 때마다 바뀝니다 (VPN이 켜졌다 꺼질 때 등). 그때 awdl0에서
+    /// 듣던 소켓(mDNS, 받는 쪽)은 열린 채로 듣지 못하게 되므로 새로 열어야 합니다.
+    pub fn ipv6_resets(&self) -> watch::Receiver<u64> {
+        self.resets.clone()
     }
 
     /// 유효한 AWDL 상대들. 오고 갈 때마다 바뀝니다.

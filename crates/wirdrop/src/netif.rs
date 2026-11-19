@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use owly_awdl::driver::Netif;
 use owly_awdl::{Ipv6Packet, MacAddr};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR, WIN32_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry, FreeMibTable, GetIpInterfaceEntry, GetUnicastIpAddressTable,
@@ -30,6 +30,9 @@ const GUID: u128 = u128::from_be_bytes(*b"WirDrop awdl0 v1");
 const RING_CAPACITY: u32 = 0x40_0000;
 /// 모든 속도 측정에 쓴 IPv6 MTU.
 pub const MTU: u32 = 1450;
+/// 사라졌던 우리 주소가 되돌린 뒤 이만큼 그대로 있어야 IPv6가 돌아왔다고 봅니다. VPN이 켜져 있는
+/// 동안에는 2초마다 다시 지우므로, 그동안은 소켓을 다시 열지 않습니다.
+const SETTLE: Duration = Duration::from_secs(10);
 
 /// 이 프로세스가 도는 동안 다음 링크를 위해 남겨 두는 어댑터. 새로 만들면 Windows가 1~2초 걸리고,
 /// 어댑터는 프로세스와 함께 사라지므로 (Wintun이 자기가 만든 것을 지웁니다) 다시 시작한 링크(USB
@@ -61,6 +64,7 @@ pub struct WintunNetif {
     dropped: u64,
     index: u32,
     addr: Ipv6Addr,
+    resets: watch::Receiver<u64>,
 }
 
 impl WintunNetif {
@@ -98,11 +102,12 @@ impl WintunNetif {
         let luid = unsafe { adapter.get_luid().Value };
         let index = adapter.get_adapter_index().map_err(other)?;
         let addr = mac.link_local();
-        configure(luid, mtu).map_err(|e| context(e, "configuring IPv6 on the adapter"))?;
+        configure(luid, mtu, Duration::from_secs(5)).map_err(|e| context(e, "configuring IPv6 on the adapter"))?;
         add_address(luid, addr).map_err(|e| context(e, &format!("adding {addr}")))?;
         tidy(luid, addr).map_err(|e| context(e, "checking the adapter's addresses"))?;
 
         let stop = Arc::new(AtomicBool::new(false));
+        let (resets_tx, resets) = watch::channel(0);
         let skipped = Arc::new(AtomicU64::new(0));
         // 묶음 16개: 많아야 패킷 1024개가 노드 밖에서 기다리고, 나머지는 Wintun 링에서.
         let (tx, rx) = mpsc::channel(16);
@@ -111,7 +116,7 @@ impl WintunNetif {
         let st = stop.clone();
         let keeper = std::thread::Builder::new()
             .name("awdl0-addr".into())
-            .spawn(move || keep_address(luid, addr, st))?;
+            .spawn(move || keep_address(luid, addr, mtu, st, resets_tx))?;
         tracing::info!("{name}: interface {index}, {addr}, MTU {mtu}");
         Ok(WintunNetif {
             session,
@@ -125,6 +130,7 @@ impl WintunNetif {
             dropped: 0,
             index,
             addr,
+            resets,
         })
     }
 
@@ -135,6 +141,12 @@ impl WintunNetif {
 
     pub fn addr(&self) -> Ipv6Addr {
         self.addr
+    }
+
+    /// awdl0의 IPv6가 리셋되었다가 돌아온 횟수. 바뀔 때마다 awdl0에서 듣는 소켓을 새로 열어야
+    /// 합니다 ([keep_address] 참고).
+    pub fn resets(&self) -> watch::Receiver<u64> {
+        self.resets.clone()
     }
 }
 
@@ -224,11 +236,51 @@ fn read_loop(session: Arc<wintun::Session>, tx: mpsc::Sender<Vec<Ipv6Packet>>, s
 }
 
 /// Windows가 주소를 바꾸면 우리 주소를 되돌리고 나머지를 지웁니다. 처음엔 자주, 그다음엔 2초마다.
-fn keep_address(luid: u64, addr: Ipv6Addr, stop: Arc<AtomicBool>) {
+///
+/// 우리 주소가 사라졌다면 무언가 이 인터페이스의 IPv6를 리셋한 것입니다. Proton VPN은 켜져 있는
+/// 동안 다른 어댑터의 IPv6를 끕니다. 그러면 awdl0에서 듣던 소켓은 열린 채로 남아도 mDNS 그룹에서
+/// 빠져, iPhone이 이 PC를 찾지 못합니다. 그래서 되돌린 주소가 [SETTLE] 동안 그대로 있으면 resets를
+/// 하나 올려, 링크를 쓰는 쪽이 소켓을 새로 열게 합니다. 리셋된 인터페이스는 Windows의 기본값으로
+/// 돌아오므로 우리 설정도 다시 겁니다.
+fn keep_address(luid: u64, addr: Ipv6Addr, mtu: u32, stop: Arc<AtomicBool>, resets: watch::Sender<u64>) {
     let started = Instant::now();
+    // 우리 주소가 사라진 때부터: 마지막으로 다시 붙였거나 붙이지 못한 때, 그리고 그동안의 횟수.
+    let mut lost: Option<(Instant, Instant, u32)> = None;
     while !stop.load(Relaxed) {
-        if let Err(e) = tidy(luid, addr) {
-            tracing::debug!("awdl0 address check failed: {e}");
+        match tidy(luid, addr) {
+            Ok(false) => {
+                if let Some((since, last, tries)) = lost
+                    && last.elapsed() >= SETTLE
+                {
+                    lost = None;
+                    tracing::info!(
+                        "awdl0: IPv6 is back after {}s gone ({tries} times put back), so what listens on awdl0 starts again",
+                        last.duration_since(since).as_secs()
+                    );
+                    resets.send_modify(|n| *n += 1);
+                }
+            }
+            put_back => {
+                let now = Instant::now();
+                match &mut lost {
+                    Some((_, last, tries)) => {
+                        *last = now;
+                        *tries += 1;
+                    }
+                    None => {
+                        tracing::warn!("awdl0: our address {addr} is gone (something reset IPv6 here, a VPN perhaps); putting it back");
+                        lost = Some((now, now, 1));
+                    }
+                }
+                match put_back {
+                    Ok(_) => {
+                        if let Err(e) = configure(luid, mtu, Duration::ZERO) {
+                            tracing::debug!("awdl0: setting IPv6 up again failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::debug!("awdl0 address check failed: {e}"),
+                }
+            }
         }
         let pause = if started.elapsed() < Duration::from_secs(10) { 2 } else { 20 };
         for _ in 0..pause {
@@ -257,20 +309,20 @@ fn check(e: WIN32_ERROR) -> io::Result<()> {
 }
 
 /// awdl0의 IPv6: 우리 MTU, DAD 없음, 라우터 탐색 없음, Windows가 받아 주면 스스로 만드는 링크 로컬
-/// 주소 없음 (아니면 [tidy]가 지웁니다).
-fn configure(luid: u64, mtu: u32) -> io::Result<()> {
-    match set_interface(luid, mtu, true) {
+/// 주소 없음 (아니면 [tidy]가 지웁니다). 스택에 인터페이스가 아직 없으면 wait 동안 기다립니다.
+fn configure(luid: u64, mtu: u32, wait: Duration) -> io::Result<()> {
+    match set_interface(luid, mtu, true, wait) {
         Err(e) if e.raw_os_error() == Some(87) => {
             tracing::debug!("awdl0: Windows won't turn its link-local address off ({e})");
-            set_interface(luid, mtu, false)
+            set_interface(luid, mtu, false, wait)
         }
         r => r,
     }
 }
 
-fn set_interface(luid: u64, mtu: u32, no_link_local: bool) -> io::Result<()> {
+fn set_interface(luid: u64, mtu: u32, no_link_local: bool, wait: Duration) -> io::Result<()> {
     // 어댑터가 나타나고 잠깐은 스택에 인터페이스가 없을 수 있습니다.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + wait;
     loop {
         // SAFETY: API가 요구하는 대로 초기화한 평범한 C 구조체.
         let result = unsafe {
@@ -315,15 +367,16 @@ fn add_address(luid: u64, addr: Ipv6Addr) -> io::Result<()> {
     if e == ERROR_OBJECT_ALREADY_EXISTS { Ok(()) } else { check(e) }
 }
 
-/// 인터페이스에서 우리 것 말고 모든 IPv6 주소를 지우고, 우리 것이 없으면 더합니다.
-fn tidy(luid: u64, addr: Ipv6Addr) -> io::Result<()> {
+/// 인터페이스에서 우리 것 말고 모든 IPv6 주소를 지우고, 우리 것이 없으면 더합니다. 우리 것이 없어
+/// 더했으면 true.
+fn tidy(luid: u64, addr: Ipv6Addr) -> io::Result<bool> {
     let mut present = false;
     // SAFETY: API가 준 표를 범위 안에서 읽고 한 번 해제합니다.
     unsafe {
         let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
         let e = GetUnicastIpAddressTable(AF_INET6, &mut table);
         if e != NO_ERROR && e != ERROR_NOT_FOUND {
-            return check(e);
+            return check(e).map(|()| false);
         }
         if !table.is_null() {
             let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
@@ -343,8 +396,7 @@ fn tidy(luid: u64, addr: Ipv6Addr) -> io::Result<()> {
         }
     }
     if !present {
-        tracing::info!("awdl0: adding {addr}");
         add_address(luid, addr)?;
     }
-    Ok(())
+    Ok(!present)
 }

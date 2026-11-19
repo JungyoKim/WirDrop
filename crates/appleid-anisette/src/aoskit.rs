@@ -23,6 +23,8 @@ const REDIRECT: &str = r"Software\WirDrop\HKLM";
 
 /// Apple에 기기로 등록할 때 쓰는 DSID: 계정이 아니라 이 기기라는 뜻의 -2 (64비트 두 조각).
 const DEVICE_DSID: (u32, u32) = (0xffff_fffe, 0xffff_ffff);
+/// 등록되지 않은 PC에 대한 otp의 답에 붙는 까닭 (그 답에는 "unregistered":true도 붙습니다).
+const UNREGISTERED: &str = "this PC isn't registered with Apple: no X-Apple-MD in AOSKit's answer";
 
 /// 기기 등록(provisioning)을 하는 CoreADI 호출들. AOSKit은 이것들을 내보내지 않지만, 내보낸
 /// Objective-C 메서드 +[AOSUtilities _performProvisioningAction:forRequest:withDSID:andClientID:]가
@@ -87,10 +89,12 @@ fn answer(aos: &Aos, words: &[&str]) -> Result<String, String> {
     // SAFETY: 모두 불러온 그 스레드에서 하는 Apple 런타임 호출입니다.
     unsafe {
         match words {
-            ["otp"] => {
-                let (md, mdm) = aos.otp()?;
-                Ok(format!("{{\"md\":\"{}\",\"mdm\":\"{}\"}}", escape(&md), escape(&mdm)))
-            }
+            ["otp"] => match aos.otp()? {
+                Some((md, mdm)) => Ok(format!("{{\"md\":\"{}\",\"mdm\":\"{}\"}}", escape(&md), escape(&mdm))),
+                // appleid는 이 답에만 PC를 등록합니다: 등록을 시작하면 전에 있던 등록과 그것에 묶인
+                // 로그인이 모두 사라지므로, 다른 실패로는 하지 않습니다.
+                None => Ok(format!("{{\"error\":\"{}\",\"unregistered\":true}}", escape(UNREGISTERED))),
+            },
             ["provision-start", spim] => {
                 let (cpim, session) = aos.provision_start(&unbase64(spim)?)?;
                 Ok(format!(
@@ -161,8 +165,9 @@ impl Aos {
     }
 
     /// +[AOSUtilities retrieveOTPHeadersForDSID:]가 DSID "-2"(계정이 아니라 기기)에 대해 주는
-    /// 기기의 OTP 헤더.
-    unsafe fn otp(&self) -> Result<(String, String), String> {
+    /// 기기의 OTP 헤더. 이 PC가 Apple에 등록되지 않았으면 None: 그때 AOSKit은 헤더를 주지만 그 안에
+    /// 일회용 암호(X-Apple-MD)가 없습니다.
+    unsafe fn otp(&self) -> Result<Option<(String, String)>, String> {
         // SAFETY: 살아 있는 인자로 하는 Apple 런타임 호출. 사전은 우리가 해제할 것이 아닙니다.
         unsafe {
             let dsid = (self.string)(std::ptr::null(), c"-2".as_ptr(), UTF8);
@@ -171,25 +176,29 @@ impl Aos {
             if headers.is_null() {
                 return Err("AOSKit gave no OTP headers".into());
             }
-            Ok((self.text(headers, c"X-Apple-MD")?, self.text(headers, c"X-Apple-MD-M")?))
+            let Some(md) = self.text(headers, c"X-Apple-MD")? else {
+                return Ok(None);
+            };
+            let mdm = self.text(headers, c"X-Apple-MD-M")?.ok_or("no X-Apple-MD-M in AOSKit's answer")?;
+            Ok(Some((md, mdm)))
         }
     }
 
-    /// CFDictionary에서 key 아래의 문자열.
-    unsafe fn text(&self, dictionary: Id, key: &CStr) -> Result<String, String> {
+    /// CFDictionary에서 key 아래의 문자열. 그 key가 없으면 None.
+    unsafe fn text(&self, dictionary: Id, key: &CStr) -> Result<Option<String>, String> {
         // SAFETY: otp에서와 같음. 버퍼는 말한 길이입니다.
         unsafe {
             let k = (self.string)(std::ptr::null(), key.as_ptr(), UTF8);
             let value = (self.lookup)(dictionary as CfRef, k);
             (self.release)(k);
             if value.is_null() {
-                return Err(format!("no {} in AOSKit's answer", key.to_string_lossy()));
+                return Ok(None);
             }
             let mut buffer = vec![0 as c_char; 2048];
             if (self.copy_out)(value, buffer.as_mut_ptr(), buffer.len() as i32, UTF8) == 0 {
                 return Err(format!("{} didn't fit", key.to_string_lossy()));
             }
-            Ok(CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned())
+            Ok(Some(CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned()))
         }
     }
 }

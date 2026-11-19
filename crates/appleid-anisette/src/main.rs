@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! otp   ->   {"md":"…","mdm":"…"}   or   {"error":"…"}
+//!            or {"error":"…","unregistered":true}   (Apple에 등록되지 않은 PC)
 //! ```
 //!
 //! 풀기만 한 iCloud for Windows에는 폴더 위치를 알려 줄 HKLM\SOFTWARE\Apple Inc. 항목이 없고, 권한

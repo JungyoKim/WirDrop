@@ -50,8 +50,9 @@ identity the way a Mac does:
 2. The AirDrop certificate from Apple (aidc.apple.com).
 3. Hashes of your iCloud contacts, so iPhones can check that you know each other.
 
-The password is never stored. The session the sign-in leaves renews the certificate and its record
-before they run out, and is kept protected for your Windows account (DPAPI). Apple's servers want
+The password is never stored. The session the sign-in leaves renews the certificate before it runs
+out and the record once a week, so a sign-in Apple stops taking shows up weeks before the record
+ends. It is kept protected for your Windows account (DPAPI). Apple's servers want
 each request vouched for by the machine; iCloud for Windows' own component does that. WirDrop
 downloads it from Apple at the first sign-in (about 160 MB) and unpacks it without installing
 iCloud.
@@ -59,7 +60,10 @@ iCloud.
 A PC that has never run iCloud for Windows or iTunes isn't registered with Apple yet, and the
 component can't vouch for it. WirDrop registers it once, before the first sign-in, the way those
 programs do: Apple sends a challenge, iCloud's own code answers it, and Apple records the PC. No
-password is involved, and a PC registered earlier is left alone.
+password is involved, and a PC registered earlier is left alone. Apple ties each sign-in to the PC
+as it was registered, so registering again would end them all: WirDrop does it only when that
+component says the PC isn't registered, and only while you sign in, never while renewing. Each
+sign-in also keeps the device ID it was made with.
 
 Several people sharing the PC can each add an Apple ID, as each user on a Mac has one. Every phone
 lists the PC once: as one of its own devices for its owner, by name for everyone else.
